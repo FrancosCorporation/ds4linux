@@ -1,0 +1,22 @@
+# DS4Linux udev rules
+# Allow non-root access to DualShock 4 controllers
+# Place this file in /etc/udev/rules.d/99-ds4linux.rules
+# Then run: sudo udevadm control --reload-rules && sudo udevadm trigger
+
+# DualShock 4 (USB)
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="09cc", MODE="0666", TAG+="uaccess"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="09cc", GROUP="input", MODE="0660"
+
+# DualShock 4 (Bluetooth dongle)
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="0ba0", MODE="0666", TAG+="uaccess"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="0ba0", GROUP="input", MODE="0660"
+
+# DualSense (PS5 controller) - bonus support
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="0ce6", MODE="0666", TAG+="uaccess"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="0ce6", GROUP="input", MODE="0660"
+
+# Allow uinput access for virtual device creation
+KERNEL=="uinput", MODE="0666", GROUP="input", TAG+="uaccess"
+
+# Allow access to LED sysfs
+SUBSYSTEM=="leds", ATTRS{idVendor}=="054c", MODE="0666", TAG+="uaccess"
