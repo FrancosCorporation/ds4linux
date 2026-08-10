@@ -4,15 +4,20 @@
 
 ## Features
 
+- **Multi-controller support** - Up to 2 DS4 controllers simultaneously (USB/Bluetooth)
 - **Xbox 360 / XInput emulation** - Play any game with native Xbox controller support
 - **PlayStation 4 / DS4 emulation** - Native PS4 support for Steam and compatible games
 - **Zero sudo required** - udev rules grant user-space access to controller and uinput
 - **Exclusive device grab** - Prevents double input (both physical + virtual)
-- **LED lightbar control** - Full RGB control with brightness, presets, and per-profile colors
-- **Advanced stick/trigger tuning** - Deadzone, sensitivity, inversion per axis
-- **Profile system** - Save/load multiple configurations (JSON)
+- **LED lightbar control** - Full RGB control with brightness, presets, battery gradient, per-profile colors
+- **Advanced stick/trigger tuning** - Deadzone, max zone, anti-deadzone, sensitivity, output curve, square stick, rotation
+- **Per-controller profiles** - Independent profiles per controller slot (JSON)
+- **Visual button mapping** - DS4 outline with clickable mapping list
+- **Touchpad configuration** - Mouse mode, controls mode, gestures, jitter compensation
+- **Gyro support** - Mouse emulation, sensitivity, calibration
+- **Rumble configuration** - Heavy/light motor control
 - **System tray integration** - Minimize to tray, runs in background
-- **Dark/Minimalist UI** - DS4Windows-inspired PySide6 interface
+- **Dark/Minimalist UI** - DS4Windows-inspired PySide6 interface (Controllers table, Profile tabs)
 - **Background daemon** - QThread-based event loop, never blocks GUI
 
 ## Architecture
@@ -24,17 +29,19 @@ ds4linux/
 ├── src/
 │   ├── constants.py         # Centralized evdev/uinput codes
 │   ├── engine/
-│   │   ├── device_manager.py    # DS4 detection & grab()
-│   │   ├── led_controller.py    # /sys/class/leds/ RGB control
-│   │   ├── virtual_device.py    # uinput device factory (Xbox/PS4)
-│   │   ├── input_mapper.py      # DS4 → virtual translation
-│   │   └── worker_thread.py     # QThread read_loop
+│   │   ├── device_manager.py     # DS4 detection & grab()
+│   │   ├── led_controller.py     # /sys/class/leds/ RGB control
+│   │   ├── virtual_device.py     # uinput device factory (Xbox/PS4)
+│   │   ├── input_mapper.py       # DS4 → virtual translation
+│   │   ├── worker_thread.py      # QThread read_loop per controller
+│   │   ├── controller_slot.py    # Per-controller state (device, virtual, mapper, LED)
+│   │   └── multi_device_manager.py # Manages up to 2 controller slots
 │   ├── config/
-│   │   └── profile_manager.py   # JSON profile persistence
+│   │   └── profile_manager.py    # JSON profile persistence
 │   └── gui/
-│       ├── main_window.py       # Main window + system tray
-│       ├── color_dialog.py      # HSV color picker
-│       └── styles.py            # QSS Dark theme
+│       ├── main_window.py        # Main window with Controllers/Profiles/Auto Profiles/Settings/Log tabs
+│       ├── color_dialog.py       # HSV color picker
+│       └── styles.py             # QSS Dark theme
 ├── install.sh                 # System installer (udev, .desktop, venv)
 ├── requirements.txt           # Python dependencies
 └── README.md
@@ -51,7 +58,7 @@ sudo ./install.sh
 ```
 
 **That's it!** The installer handles everything:
-- System dependencies (python3, libevdev, uinput, PySide6)
+- System dependencies (python3, libevdev, libxcb-cursor0, PySide6)
 - Python virtual environment with all packages
 - udev rules for non-root controller access
 - Desktop entry + icon for application menu
@@ -61,18 +68,16 @@ Then run `ds4linux` from terminal or find **"DS4Linux"** in your application men
 
 ### Manual Installation (Alternative)
 
-### Manual Installation
-
 ```bash
 # Install system dependencies
 # Ubuntu/Debian:
-sudo apt install python3 python3-pip python3-venv libevdev2 libevdev-dev
+sudo apt install python3 python3-pip python3-venv libevdev2 libevdev-dev libxcb-cursor0
 
 # Arch:
-sudo pacman -S python python-pip python-virtualenv libevdev
+sudo pacman -S python python-pip python-virtualenv libevdev libxcb
 
 # Fedora:
-sudo dnf install python3 python3-pip python3-virtualenv libevdev libevdev-devel
+sudo dnf install python3 python3-pip python3-virtualenv libevdev libevdev-devel libxcb
 
 # Create venv & install
 python3 -m venv venv
@@ -93,12 +98,38 @@ python3 -m src.main
 
 ## Usage
 
-1. **Connect your DS4** via USB or Bluetooth
-2. **Launch DS4Linux** - it will auto-detect the controller
-3. **Click "Connect"** - creates virtual Xbox/PS4 device
-4. **Configure** - Adjust deadzones, sensitivity, LED color in tabs
-5. **Save Profile** - Settings persist across restarts
-6. **Minimize to tray** - Close window to keep running in background
+1. **Connect your DS4** via USB or Bluetooth (up to 2 controllers)
+2. **Launch DS4Linux** - it will auto-detect controllers
+3. **Controllers tab** - View all connected controllers in a table (ID, Status, Battery, Profile, LED color)
+4. **Click "Editar"** on a controller row - Opens per-controller Profile tab
+5. **Configure** in Profile tab:
+   - **Controls** - Visual DS4 mapping, Touchpad mode, button list
+   - **Axis Config** - LS/RS/L2/R2 deadzone, maxzone, anti-deadzone, sensitivity, curves
+   - **Lightbar** - Color picker, brightness, presets, battery gradient
+   - **Gyro** - Enable, mouse mode, sensitivity, calibration
+   - **Other** - Rumble, LED behavior, auto-reconnect
+6. **Save Profile** - Settings persist per controller slot
+7. **Minimize to tray** - Close window to keep running in background
+
+## GUI Overview (DS4Windows-style)
+
+### Main Tabs
+| Tab | Description |
+|-----|-------------|
+| **Controllers** | Table view of all controller slots with status, battery, profile dropdown, LED color, edit button |
+| **Profiles** | Placeholder - select controller from Controllers tab |
+| **Auto Profiles** | Coming soon - auto-switch profiles by game |
+| **Settings** | Startup options, udev installer, about |
+| **Log** | Real-time event log |
+
+### Per-Controller Profile Tab (opened via "Editar")
+- **Header**: Profile name, Save/Cancel, Keep window size
+- **Controls**: Visual DS4 outline + mapping list + Touchpad settings
+- **Axis Config**: LS/RS/L2/R2 advanced tuning (deadzone, maxzone, anti-deadzone, sensitivity, output curve, square stick, rotation)
+- **Lightbar**: HSV color picker, presets, brightness, battery gradient colors
+- **Gyro**: Enable, mouse mode, sensitivity, calibration
+- **Other**: Rumble intensity, LED behavior modes, connection settings
+- **Footer**: Status, Hotkeys/About link, Stop button
 
 ## Supported Controllers
 
@@ -114,6 +145,8 @@ python3 -m src.main
 |------|----------------|----------|
 | Xbox 360 | 045e:028e | XInput games, Steam, most native Linux games |
 | PS4 / DS4 | 054c:09cc | Steam (PS4 support), PlayStation Now, Remote Play |
+
+*Each controller slot can independently emulate Xbox or PS4*
 
 ## Configuration
 
@@ -162,6 +195,10 @@ python3 -m src.main
 **LED not working:**
 - Requires kernel 5.10+ with `hid_playstation` module
 - Check: `ls /sys/class/leds/` for `*::kbd_backlight` or similar
+
+**Qt platform plugin error (xcb):**
+- Install: `sudo apt install libxcb-cursor0` (Ubuntu/Debian)
+- Or use Wayland: `QT_QPA_PLATFORM=wayland ds4linux`
 
 ## License
 
