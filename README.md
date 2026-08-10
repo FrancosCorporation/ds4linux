@@ -42,15 +42,24 @@ ds4linux/
 
 ## Quick Start
 
-### Automatic Installation (Recommended)
+### 🚀 One-Command Install (Recommended)
 
 ```bash
-git clone https://github.com/yourusername/ds4linux.git
+git clone https://github.com/FrancosCorporation/ds4linux.git
 cd ds4linux
 sudo ./install.sh
 ```
 
-Then run `ds4linux` from terminal or your application menu.
+**That's it!** The installer handles everything:
+- System dependencies (python3, libevdev, uinput, PySide6)
+- Python virtual environment with all packages
+- udev rules for non-root controller access
+- Desktop entry + icon for application menu
+- `ds4linux` command in `/usr/local/bin`
+
+Then run `ds4linux` from terminal or find **"DS4Linux"** in your application menu.
+
+### Manual Installation (Alternative)
 
 ### Manual Installation
 
