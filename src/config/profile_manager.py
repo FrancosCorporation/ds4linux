@@ -134,10 +134,11 @@ class ProfileManager:
         }
 
     def _dict_to_profile(self, data: dict) -> ProfileConfig:
+        button_maps = {int(k): v for k, v in data.get("button_maps", {}).items()}
         return ProfileConfig(
             name=data.get("name", "Default"),
             device_type=VirtualDeviceType(data.get("device_type", "xbox")),
-            button_maps=data.get("button_maps", {}),
+            button_maps=button_maps,
             left_stick=AxisConfig(**data.get("left_stick", {})),
             right_stick=AxisConfig(**data.get("right_stick", {})),
             left_trigger=TriggerConfig(**data.get("left_trigger", {})),

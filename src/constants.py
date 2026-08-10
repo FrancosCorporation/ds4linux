@@ -229,3 +229,5 @@ APP_NAME = "DS4Linux"
 APP_VERSION = "1.0.0"
 ORG_NAME = "DS4Linux"
 ORG_DOMAIN = "ds4linux.app"
+
+MAX_CONTROLLERS = 2
