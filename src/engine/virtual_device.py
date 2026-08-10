@@ -1,18 +1,13 @@
+from __future__ import annotations
+
 from enum import Enum
-from pathlib import Path
-from typing import Dict, List, Tuple, Optional
-import struct
-import fcntl
-import os
+from typing import Dict, List, Optional, Tuple
 import logging
 
 from evdev import UInput, AbsInfo, ecodes as e
 
 from ..constants import (
-    UINPUT_PATH,
-    XboxBtn, PS4Btn, XboxAbs, DS4Abs,
-    MAX_AXIS_VALUE, MAX_TRIGGER_VALUE,
-    VIRTUAL_DEVICE_TYPES
+    MAX_AXIS_VALUE, MAX_TRIGGER_VALUE
 )
 
 logger = logging.getLogger(__name__)
@@ -24,34 +19,29 @@ class VirtualDeviceType(Enum):
 
 
 class VirtualDevice:
-    UI_DEV_CREATE = 0x5501
-    UI_DEV_DESTROY = 0x5502
-    UI_SET_EVBIT = 0x40045564
-    UI_SET_KEYBIT = 0x40045565
-    UI_SET_ABSBIT = 0x40045567
-
     def __init__(self, device_type: VirtualDeviceType = VirtualDeviceType.XBOX):
         self.device_type = device_type
         self._uinput: Optional[UInput] = None
-        self._fd: Optional[int] = None
-        self._capabilities = self._build_capabilities()
+        self._caps, self._name, self._vendor, self._product, self._version = \
+            self._build_capabilities()
 
-    def _build_capabilities(self) -> Dict[int, List[Tuple]]:
+    def _build_capabilities(self) -> Tuple[Dict[int, list], str, int, int, int]:
         caps = {
             e.EV_KEY: [],
             e.EV_ABS: [],
         }
+
         if self.device_type == VirtualDeviceType.XBOX:
-            caps[e.EV_KEY].extend([
-                (e.BTN_A, 1), (e.BTN_B, 1), (e.BTN_X, 1), (e.BTN_Y, 1),
-                (e.BTN_TL, 1), (e.BTN_TR, 1),
-                (e.BTN_THUMBL, 1), (e.BTN_THUMBR, 1),
-                (e.BTN_START, 1), (e.BTN_SELECT, 1),
-                (e.BTN_MODE, 1),
-                (e.BTN_DPAD_UP, 1), (e.BTN_DPAD_DOWN, 1),
-                (e.BTN_DPAD_LEFT, 1), (e.BTN_DPAD_RIGHT, 1),
-            ])
-            caps[e.EV_ABS].extend([
+            caps[e.EV_KEY] = [
+                e.BTN_A, e.BTN_B, e.BTN_X, e.BTN_Y,
+                e.BTN_TL, e.BTN_TR,
+                e.BTN_THUMBL, e.BTN_THUMBR,
+                e.BTN_START, e.BTN_SELECT,
+                e.BTN_MODE,
+                e.BTN_DPAD_UP, e.BTN_DPAD_DOWN,
+                e.BTN_DPAD_LEFT, e.BTN_DPAD_RIGHT,
+            ]
+            caps[e.EV_ABS] = [
                 (e.ABS_X, AbsInfo(0, -MAX_AXIS_VALUE, MAX_AXIS_VALUE, 0, 0, 0)),
                 (e.ABS_Y, AbsInfo(0, -MAX_AXIS_VALUE, MAX_AXIS_VALUE, 0, 0, 0)),
                 (e.ABS_RX, AbsInfo(0, -MAX_AXIS_VALUE, MAX_AXIS_VALUE, 0, 0, 0)),
@@ -60,21 +50,22 @@ class VirtualDevice:
                 (e.ABS_RZ, AbsInfo(0, 0, MAX_TRIGGER_VALUE, 0, 0, 0)),
                 (e.ABS_HAT0X, AbsInfo(0, -1, 1, 0, 0, 0)),
                 (e.ABS_HAT0Y, AbsInfo(0, -1, 1, 0, 0, 0)),
-            ])
-            name = "Xbox 360 Controller (DS4Linux)"
-            vendor, product, version = 0x045e, 0x028e, 0x0110
-        else:
-            caps[e.EV_KEY].extend([
-                (e.BTN_SOUTH, 1), (e.BTN_EAST, 1), (e.BTN_NORTH, 1), (e.BTN_WEST, 1),
-                (e.BTN_TL, 1), (e.BTN_TR, 1),
-                (e.BTN_THUMBL, 1), (e.BTN_THUMBR, 1),
-                (e.BTN_START, 1), (e.BTN_SELECT, 1),
-                (e.BTN_MODE, 1),
-                (e.BTN_DPAD_UP, 1), (e.BTN_DPAD_DOWN, 1),
-                (e.BTN_DPAD_LEFT, 1), (e.BTN_DPAD_RIGHT, 1),
-                (e.BTN_TRIGGER_HAPPY1, 1), (e.BTN_TRIGGER_HAPPY2, 1),
-            ])
-            caps[e.EV_ABS].extend([
+            ]
+            name = "Microsoft X-Box 360 pad"
+            vendor, product, version = 0x045e, 0x028e, 0x0114
+
+        else:  # PS4 / DS4
+            caps[e.EV_KEY] = [
+                e.BTN_SOUTH, e.BTN_EAST, e.BTN_NORTH, e.BTN_WEST,
+                e.BTN_TL, e.BTN_TR,
+                e.BTN_THUMBL, e.BTN_THUMBR,
+                e.BTN_START, e.BTN_SELECT,
+                e.BTN_MODE,
+                e.BTN_DPAD_UP, e.BTN_DPAD_DOWN,
+                e.BTN_DPAD_LEFT, e.BTN_DPAD_RIGHT,
+                e.BTN_TRIGGER_HAPPY1, e.BTN_TRIGGER_HAPPY2,
+            ]
+            caps[e.EV_ABS] = [
                 (e.ABS_X, AbsInfo(0, -MAX_AXIS_VALUE, MAX_AXIS_VALUE, 0, 0, 0)),
                 (e.ABS_Y, AbsInfo(0, -MAX_AXIS_VALUE, MAX_AXIS_VALUE, 0, 0, 0)),
                 (e.ABS_RX, AbsInfo(0, -MAX_AXIS_VALUE, MAX_AXIS_VALUE, 0, 0, 0)),
@@ -83,23 +74,22 @@ class VirtualDevice:
                 (e.ABS_RZ, AbsInfo(0, 0, MAX_TRIGGER_VALUE, 0, 0, 0)),
                 (e.ABS_HAT0X, AbsInfo(0, -1, 1, 0, 0, 0)),
                 (e.ABS_HAT0Y, AbsInfo(0, -1, 1, 0, 0, 0)),
-            ])
-            name = "Wireless Controller (DS4Linux)"
+            ]
+            name = "Sony Interactive Entertainment DualShock 4"
             vendor, product, version = 0x054c, 0x09cc, 0x0100
 
-        return {"caps": caps, "name": name, "vendor": vendor, "product": product, "version": version}
+        return caps, name, vendor, product, version
 
     def create(self) -> bool:
         try:
-            caps = self._capabilities["caps"]
             self._uinput = UInput(
-                caps,
-                name=self._capabilities["name"],
-                vendor=self._capabilities["vendor"],
-                product=self._capabilities["product"],
-                version=self._capabilities["version"],
+                self._caps,
+                name=self._name,
+                vendor=self._vendor,
+                product=self._product,
+                version=self._version,
             )
-            logger.info(f"Created virtual device: {self._capabilities['name']}")
+            logger.info(f"Created virtual device: {self._name}")
             return True
         except Exception as e:
             logger.error(f"Failed to create virtual device: {e}")
@@ -140,6 +130,7 @@ class VirtualDevice:
             was_active = self.is_active()
             self.destroy()
             self.device_type = device_type
-            self._capabilities = self._build_capabilities()
+            self._caps, self._name, self._vendor, self._product, self._version = \
+                self._build_capabilities()
             if was_active:
                 self.create()

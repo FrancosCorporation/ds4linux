@@ -196,6 +196,10 @@ PS4_ABS_MAP = {
 DS4_VID = 0x054C
 DS4_PID = 0x09CC
 DS4_PID_DONGLE = 0x0BA0
+DS4_PID_ALT = 0x05C4  # DualSense (PS5) and some newer DS4 variants
+
+# All PIDs we recognize as DS4/compatible
+DS4_PIDS = (DS4_PID, DS4_PID_DONGLE, DS4_PID_ALT)
 
 UINPUT_PATH = Path("/dev/uinput")
 HIDRAW_BASE = Path("/dev/hidraw")

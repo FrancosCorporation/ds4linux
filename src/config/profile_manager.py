@@ -113,20 +113,38 @@ class ProfileManager:
             "button_maps": profile.button_maps,
             "left_stick": {
                 "deadzone": profile.left_stick.deadzone,
+                "max_zone": profile.left_stick.max_zone,
+                "anti_deadzone": profile.left_stick.anti_deadzone,
                 "sensitivity": profile.left_stick.sensitivity,
+                "output_curve": profile.left_stick.output_curve,
+                "square_stick": profile.left_stick.square_stick,
+                "square_stick_value": profile.left_stick.square_stick_value,
+                "curve_input": profile.left_stick.curve_input,
+                "rotation": profile.left_stick.rotation,
                 "inverted": profile.left_stick.inverted,
             },
             "right_stick": {
                 "deadzone": profile.right_stick.deadzone,
+                "max_zone": profile.right_stick.max_zone,
+                "anti_deadzone": profile.right_stick.anti_deadzone,
                 "sensitivity": profile.right_stick.sensitivity,
+                "output_curve": profile.right_stick.output_curve,
+                "square_stick": profile.right_stick.square_stick,
+                "square_stick_value": profile.right_stick.square_stick_value,
+                "curve_input": profile.right_stick.curve_input,
+                "rotation": profile.right_stick.rotation,
                 "inverted": profile.right_stick.inverted,
             },
             "left_trigger": {
                 "deadzone": profile.left_trigger.deadzone,
+                "max_zone": profile.left_trigger.max_zone,
+                "anti_deadzone": profile.left_trigger.anti_deadzone,
                 "sensitivity": profile.left_trigger.sensitivity,
             },
             "right_trigger": {
                 "deadzone": profile.right_trigger.deadzone,
+                "max_zone": profile.right_trigger.max_zone,
+                "anti_deadzone": profile.right_trigger.anti_deadzone,
                 "sensitivity": profile.right_trigger.sensitivity,
             },
             "led_color": profile.led_color,
@@ -135,14 +153,18 @@ class ProfileManager:
 
     def _dict_to_profile(self, data: dict) -> ProfileConfig:
         button_maps = {int(k): v for k, v in data.get("button_maps", {}).items()}
+        ls = data.get("left_stick", {})
+        rs = data.get("right_stick", {})
+        lt = data.get("left_trigger", {})
+        rt = data.get("right_trigger", {})
         return ProfileConfig(
             name=data.get("name", "Default"),
             device_type=VirtualDeviceType(data.get("device_type", "xbox")),
             button_maps=button_maps,
-            left_stick=AxisConfig(**data.get("left_stick", {})),
-            right_stick=AxisConfig(**data.get("right_stick", {})),
-            left_trigger=TriggerConfig(**data.get("left_trigger", {})),
-            right_trigger=TriggerConfig(**data.get("right_trigger", {})),
+            left_stick=AxisConfig(**ls),
+            right_stick=AxisConfig(**rs),
+            left_trigger=TriggerConfig(**lt),
+            right_trigger=TriggerConfig(**rt),
             led_color=tuple(data.get("led_color", (0, 0, 255))),
             led_brightness=data.get("led_brightness", 255),
         )

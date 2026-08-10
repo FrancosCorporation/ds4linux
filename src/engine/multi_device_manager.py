@@ -1,26 +1,80 @@
+from __future__ import annotations
+
 from typing import List, Optional, Dict
 from pathlib import Path
 import logging
 
-from evdev import InputDevice, list_devices
+from evdev import InputDevice
 
-from .device_manager import DeviceManager
 from .controller_slot import ControllerSlot, SlotStatus
-from ..constants import DS4_VID, DS4_PID, DS4_PID_DONGLE, MAX_CONTROLLERS
+from .device_monitor import DeviceMonitor
+from ..constants import DS4_VID, DS4_PIDS, MAX_CONTROLLERS
+from ..config.profile_manager import ProfileManager
 
 logger = logging.getLogger(__name__)
 
 
 class MultiDeviceManager:
-    def __init__(self, max_slots: int = 2):
+    def __init__(self, max_slots: int = MAX_CONTROLLERS):
         self.max_slots = max_slots
         self._slots: Dict[int, ControllerSlot] = {}
+        self._profile_manager = ProfileManager()
         self._device_paths_in_use: set = set()
-        
+
+        # Create slots
         for i in range(max_slots):
-            slot = ControllerSlot(i)
+            slot = ControllerSlot(i, profile_manager=self._profile_manager)
+            slot.log_message.connect(self._on_slot_log)
             self._slots[i] = slot
 
+        # Create device monitor in background thread
+        self._monitor = DeviceMonitor()
+        self._monitor.device_added.connect(self._on_device_added)
+        self._monitor.device_removed.connect(self._on_device_removed)
+        self._monitor.scan_finished.connect(self._on_scan_finished)
+        self._monitor.start()
+
+    # ------------------------------------------------------------------
+    # Signal handlers for DeviceMonitor
+    # ------------------------------------------------------------------
+    def _on_scan_finished(self, paths: list):
+        for path in paths:
+            if path not in self._device_paths_in_use:
+                self._try_assign_device(path)
+
+    def _on_device_added(self, path: str):
+        if path not in self._device_paths_in_use:
+            self._try_assign_device(path)
+
+    def _on_device_removed(self, path: str):
+        for sid, slot in list(self._slots.items()):
+            if slot.device_path == path:
+                self._device_paths_in_use.discard(path)
+                slot.stop_worker()
+                slot.detach_device()
+                logger.info(f"Removed controller at {path} from slot {sid}")
+
+    def _try_assign_device(self, path: str) -> bool:
+        slot = self._get_available_slot()
+        if not slot:
+            logger.warning("All controller slots in use")
+            return False
+
+        profile = self._profile_manager.load_profile(
+            self._profile_manager.get_current_profile_name() or "Default"
+        )
+        slot.set_profile(profile)
+
+        if slot.attach_device(path):
+            self._device_paths_in_use.add(path)
+            slot.start_worker()
+            logger.info(f"Assigned {path} to slot {slot.slot_id}")
+            return True
+        return False
+
+    # ------------------------------------------------------------------
+    # Slot management
+    # ------------------------------------------------------------------
     def get_slot(self, slot_id: int) -> Optional[ControllerSlot]:
         return self._slots.get(slot_id)
 
@@ -36,50 +90,39 @@ class MultiDeviceManager:
                 return slot
         return None
 
-    def find_all_ds4_devices(self) -> List[InputDevice]:
-        devices = []
-        for path in list_devices():
-            try:
-                dev = InputDevice(path)
-                if dev.info.vendor == DS4_VID and dev.info.product in (DS4_PID, DS4_PID_DONGLE):
-                    if path not in self._device_paths_in_use:
-                        devices.append(dev)
-            except (OSError, PermissionError):
-                pass
-        return devices
+    def _get_available_slot(self) -> Optional[ControllerSlot]:
+        return self.get_available_slot()
 
-    def auto_assign_devices(self) -> int:
-        devices = self.find_all_ds4_devices()
-        assigned = 0
-        for device in devices:
-            if assigned >= self.max_slots:
-                break
-            slot = self.get_available_slot()
-            if slot:
-                if slot.connect(device.path):
-                    self._device_paths_in_use.add(device.path)
-                    slot.start_worker()
-                    assigned += 1
-        return assigned
+    def get_slot_by_device_path(self, device_path: str) -> Optional[ControllerSlot]:
+        for slot in self._slots.values():
+            if slot.device_path == device_path:
+                return slot
+        return None
 
     def connect_slot_to_device(self, slot_id: int, device_path: str) -> bool:
         slot = self.get_slot(slot_id)
         if not slot:
             return False
-        
+
         if slot.is_connected:
             if slot.device_path == device_path:
                 return True
-            slot.disconnect()
+            slot.detach_device()
             if slot.device_path:
                 self._device_paths_in_use.discard(slot.device_path)
-        
+
+        # Handle if device is already in use by another slot
         if device_path in self._device_paths_in_use:
-            other_slot = self._find_slot_by_device_path(device_path)
+            other_slot = self.get_slot_by_device_path(device_path)
             if other_slot and other_slot != slot:
-                other_slot.disconnect()
-        
-        if slot.connect(device_path):
+                other_slot.detach_device()
+
+        profile = self._profile_manager.load_profile(
+            self._profile_manager.get_current_profile_name() or "Default"
+        )
+        slot.set_profile(profile)
+
+        if slot.attach_device(device_path):
             self._device_paths_in_use.add(device_path)
             slot.start_worker()
             return True
@@ -91,7 +134,7 @@ class MultiDeviceManager:
             slot.stop_worker()
             if slot.device_path:
                 self._device_paths_in_use.discard(slot.device_path)
-            slot.disconnect()
+            slot.detach_device()
 
     def disconnect_all(self):
         for slot in self._slots.values():
@@ -99,13 +142,11 @@ class MultiDeviceManager:
                 slot.stop_worker()
                 if slot.device_path:
                     self._device_paths_in_use.discard(slot.device_path)
-                slot.disconnect()
-
-    def _find_slot_by_device_path(self, device_path: str) -> Optional[ControllerSlot]:
-        for slot in self._slots.values():
-            if slot.device_path == device_path:
-                return slot
-        return None
+                slot.detach_device()
 
     def cleanup(self):
+        self._monitor.stop()
         self.disconnect_all()
+
+    def _on_slot_log(self, msg: str):
+        logger.info(msg)

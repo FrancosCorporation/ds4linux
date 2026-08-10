@@ -21,13 +21,22 @@ class Stick(Enum):
 @dataclass
 class AxisConfig:
     deadzone: float = 0.15
+    max_zone: float = 1.0
+    anti_deadzone: float = 0.0
     sensitivity: float = 1.0
+    output_curve: str = "Linear"
+    square_stick: bool = False
+    square_stick_value: float = 5.0
+    curve_input: int = 0
+    rotation: int = 0
     inverted: bool = False
 
 
 @dataclass
 class TriggerConfig:
     deadzone: float = 0.05
+    max_zone: float = 1.0
+    anti_deadzone: float = 0.0
     sensitivity: float = 1.0
 
 
@@ -120,7 +129,20 @@ class InputMapper:
             normalized = 0.0
         else:
             sign = 1 if normalized > 0 else -1
-            normalized = sign * min(1.0, (abs(normalized) - cfg.deadzone) / (1.0 - cfg.deadzone) * cfg.sensitivity)
+            adj = (abs(normalized) - cfg.deadzone) / (1.0 - cfg.deadzone)
+            adj = 1.0 - (1.0 - adj) * (1.0 - cfg.anti_deadzone)
+            adj = min(1.0, adj * cfg.max_zone)
+            adj = adj * cfg.sensitivity
+            normalized = sign * adj
+            
+        if cfg.square_stick:
+            import math
+            if abs(normalized) > 0.001:
+                sign_x = 1 if normalized > 0 else -1
+                norm = abs(normalized)
+                squared = norm ** (1 + cfg.square_stick_value / 100.0)
+                normalized = sign_x * squared
+                
         if cfg.inverted:
             normalized = -normalized
         return int(normalized * max_val)
