@@ -49,22 +49,26 @@ install_dependencies() {
         ubuntu|debian|linuxmint|pop|elementary|zorin)
             apt-get update
             apt-get install -y python3 python3-pip python3-venv \
-                libevdev2 libevdev-dev uinput \
+                libevdev2 libevdev-dev \
+                libxcb-cursor0 \
                 python3-pyqt6 python3-pyqt6.qtsvg || true
             ;;
         arch|manjaro|endeavouros|garuda)
             pacman -Sy --needed --noconfirm python python-pip python-virtualenv \
-                libevdev uinput \
+                libevdev \
+                libxcb \
                 pyside6 qt6-svg || true
             ;;
         fedora|rhel|centos|rocky|almalinux)
             dnf install -y python3 python3-pip python3-virtualenv \
-                libevdev libevdev-devel uinput \
+                libevdev libevdev-devel \
+                libxcb \
                 python3-pyside6 qt6-qtsvg || true
             ;;
         opensuse*|suse)
             zypper install -y python3 python3-pip python3-virtualenv \
-                libevdev2 libevdev-devel uinput \
+                libevdev2 libevdev-devel \
+                libxcb \
                 python3-pyside6 qt6-qtsvg || true
             ;;
         *)

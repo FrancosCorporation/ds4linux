@@ -1,4 +1,4 @@
-from enum import IntEnum
+from enum import IntEnum, Enum
 from pathlib import Path
 
 
@@ -218,6 +218,12 @@ KERNEL=="uinput", MODE="0666", GROUP="input"
 '''
 
 VIRTUAL_DEVICE_TYPES = ("xbox", "ps4")
+
+
+class VirtualDeviceType(Enum):
+    XBOX = "xbox"
+    PS4 = "ps4"
+
 
 APP_NAME = "DS4Linux"
 APP_VERSION = "1.0.0"
