@@ -76,6 +76,8 @@ class LEDController:
 
     def _init_from_path(self, led_path: Path):
         """Initialize from the input base directory (without :red/:green/:blue suffix)."""
+        from ..constants import SYS_LEDS_BASE
+
         self._led_path = led_path
 
         # Look for the three color subdirectories
@@ -169,35 +171,79 @@ class LEDController:
     @staticmethod
     def find_ds4_led(device_path: str) -> Optional[Path]:
         """
-        Find the LED sysfs directory for a DS4 controller by matching
-        the input device number from the evdev path (e.g., event27 -> input27).
+        Find the LED sysfs directory for a DS4 controller.
+        
+        Method: Follow the sysfs symlink from /sys/class/input/eventN/device
+        to find the HID device, then look for LED dirs in /sys/class/leds/
+        that point to the same HID device.
         """
         from ..constants import SYS_LEDS_BASE
+        from pathlib import Path as P
 
         try:
-            # Extract input device number from path like /dev/input/event27
-            event_name = Path(device_path).name  # "event27"
-            num_str = event_name.replace("event", "")
-            if not num_str.isdigit():
-                return None
+            event_name = P(device_path).name  # "event19"
+            
+            # Follow the device symlink: /sys/class/input/event19/device -> ../../input52
+            input_link = P(f"/sys/class/input/{event_name}/device")
+            if not input_link.exists():
+                # Try alternative path
+                input_link = P(f"/sys/class/input/{event_name}")
+            
+            if input_link.exists():
+                # Resolve the symlink to find the actual device path
+                device_sysfs = input_link.resolve()
+                # Extract input device name (e.g., "input52" from path)
+                device_name = device_sysfs.name
+                
+                # Look for LED dirs that have this device as parent
+                # LED dirs are like input52:red, input52:green, input52:blue
+                base_name = device_name  # e.g., "input52"
+                red_dir = SYS_LEDS_BASE / f"{base_name}:red"
+                if red_dir.exists():
+                    return SYS_LEDS_BASE / base_name
 
-            input_num = int(num_str)
+            # Fallback: scan all LED directories and match by device symlink
+            input_sysfs = P(f"/sys/class/input/{event_name}")
+            if input_sysfs.exists():
+                try:
+                    resolved_input = input_sysfs.resolve()
+                except (OSError, RuntimeError):
+                    return None
 
-            # The LED dirs are named like "input27:red", "input27:green", "input27:blue"
-            red_dir = SYS_LEDS_BASE / f"input{input_num}:red"
-            if red_dir.exists():
-                # Return the base path (without :red suffix)
-                return SYS_LEDS_BASE / f"input{input_num}"
-
-            # Also try matching via inputNN symlink
             for entry in SYS_LEDS_BASE.iterdir():
                 if not entry.is_dir():
                     continue
-                name = entry.name.lower()
-                if f"input{input_num}:" in name and ":" in name:
-                    # Found a color dir - return the base
-                    base = entry.name.split(":")[0]
-                    return SYS_LEDS_BASE / base
+                name_lower = entry.name.lower()
+                if ":red" not in name_lower and ":green" not in name_lower and ":blue" not in name_lower:
+                    continue
+                
+                # Check if this LED's device matches our input device
+                device_link = entry / "device"
+                if device_link.exists():
+                    try:
+                        led_device = device_link.resolve()
+                        # Match by checking if the HID device path matches
+                        if input_sysfs.exists():
+                            # The LED device symlink points to something like
+                            # ../../../0005:054C:05C4.0006 which should match
+                            # the input device's parent directory
+                            led_parent = led_device.parent
+                            if str(led_parent) == str(resolved_input):
+                                base = entry.name.split(":")[0]
+                                return SYS_LEDS_BASE / base
+                    except (OSError, RuntimeError):
+                        continue
+
+            # Second fallback: just look for any LED with red/green/blue trio
+            for entry in SYS_LEDS_BASE.iterdir():
+                if not entry.is_dir():
+                    continue
+                if ":red" in entry.name:
+                    base = entry.name.replace(":red", "")
+                    green = SYS_LEDS_BASE / f"{base}:green"
+                    blue = SYS_LEDS_BASE / f"{base}:blue"
+                    if green.exists() and blue.exists():
+                        return SYS_LEDS_BASE / base
 
         except Exception as e:
             logger.debug(f"Error finding DS4 LED for {device_path}: {e}")
