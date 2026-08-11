@@ -235,12 +235,17 @@ class ControllersTableWidget(QWidget):
         profile_combo = QComboBox()
         pm = self.multi_manager._profile_manager
         profile_names = pm.list_profiles()
+        profile_combo.blockSignals(True)
         profile_combo.addItems(profile_names)
         if slot.profile:
             idx = profile_combo.findText(slot.profile.name)
             if idx >= 0:
                 profile_combo.setCurrentIndex(idx)
         profile_combo.addItem(CREATE_NEW_TEXT)
+        # Ensure we don't start on the "Create New" item
+        if profile_combo.currentIndex() == profile_combo.count() - 1:
+            profile_combo.setCurrentIndex(0)
+        profile_combo.blockSignals(False)
         profile_combo.currentTextChanged.connect(
             lambda txt, sid=slot.slot_id: self._on_profile_changed(sid, txt)
         )
@@ -317,8 +322,7 @@ class ControllersTableWidget(QWidget):
 
         name, ok = QInputDialog.getText(
             self, "Novo Perfil",
-            "Nome do perfil:",
-            placeholderText="Digite o nome do perfil..."
+            "Nome do perfil:"
         )
         if ok and name.strip():
             name = name.strip()
