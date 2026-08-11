@@ -48,7 +48,34 @@ class MultiDeviceManager(QObject):
         self._monitor.start()
 
     def _on_scan_finished(self, paths: list):
+        """Handle initial scan or periodic rescan."""
+        # Find currently connected devices by their unique ID
+        connected_uniqs = set()
+        for slot in self._slots.values():
+            if slot.is_connected and slot.device:
+                connected_uniqs.add(slot.device.uniq)
+
         for path in paths:
+            if path in self._device_paths_in_use:
+                continue
+            # Check if this device was previously connected (reconnection)
+            try:
+                from evdev import InputDevice
+                dev = InputDevice(path)
+                if dev.uniq in connected_uniqs:
+                    # This is a reconnection - find the slot and reconnect
+                    for slot in self._slots.values():
+                        if slot.device and slot.device.uniq == dev.uniq and not slot.is_connected:
+                            logger.info(f"Reconnecting device {dev.uniq} to slot {slot.slot_id}")
+                            self._device_paths_in_use.add(path)
+                            slot._device_path = path
+                            if slot.attach_device(path):
+                                slot.start_worker()
+                                self.device_connected_signal.emit(slot.slot_id, path)
+                            return
+            except Exception:
+                pass
+            # Normal new device
             if path not in self._device_paths_in_use:
                 self._try_assign_device(path)
 

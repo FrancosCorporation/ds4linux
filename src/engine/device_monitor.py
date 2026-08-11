@@ -62,6 +62,17 @@ class DeviceMonitor(QObject):
         self._timer.timeout.connect(self._poll_events)
         self._timer.start(500)
 
+        # Also do periodic rescan to catch reconnections
+        self._rescan_timer = QTimer(self)
+        self._rescan_timer.timeout.connect(self._periodic_rescan)
+        self._rescan_timer.start(2000)  # Rescan every 2 seconds
+
+    def _periodic_rescan(self) -> None:
+        """Periodically rescan to detect reconnections with new event numbers."""
+        if not self._running:
+            return
+        self._scan_existing()
+
     def _poll_events(self) -> None:
         if not self._monitor or not self._running:
             return
