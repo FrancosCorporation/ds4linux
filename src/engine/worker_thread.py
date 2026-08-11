@@ -1,5 +1,6 @@
 from PySide6.QtCore import QThread, Signal
 from evdev import InputDevice, ecodes as e
+import select
 import logging
 
 from .virtual_device import VirtualDevice
@@ -13,7 +14,7 @@ class WorkerThread(QThread):
     """
     Reads events from a single pre-grabbed InputDevice in a background thread.
     Optimized for minimal input lag - processes events as quickly as possible.
-    
+
     The device grab, open, close lifecycle is handled by ControllerSlot.
     """
     device_connected = Signal(object)
@@ -63,77 +64,101 @@ class WorkerThread(QThread):
         battery = self._read_battery()
         self.battery_update.emit(battery)
 
-        # Get references for hot loop (avoid attribute lookups each iteration)
         vdev = self._virtual_device
         mapper = self._input_mapper
         device = self._device
-        
+
         if not vdev or not mapper:
             return
 
         write_event = vdev.write_event
         sync = vdev.sync
 
-        # Get mapping dicts once
         btn_map = mapper.profile.button_maps
-        
+
         from ..constants import XBOX_ABS_MAP, PS4_ABS_MAP, VirtualDeviceType
         if mapper.profile.device_type == VirtualDeviceType.XBOX:
             abs_map = XBOX_ABS_MAP
         else:
             abs_map = PS4_ABS_MAP
 
-        # Precompute event type constants
         EV_KEY = e.EV_KEY
         EV_ABS = e.EV_ABS
+        EV_FF = e.EV_FF
         EV_ABS_HAT0X = e.ABS_HAT0X
         EV_ABS_HAT0Y = e.ABS_HAT0Y
 
-        # Button/axis state tracking
         btn_state = mapper._btn_state
         axis_state = mapper._axis_state
 
+        phys_fd = device.fd
+        virt_fd = vdev.uinput_fd
+        fds_to_watch = [phys_fd]
+        if virt_fd >= 0:
+            fds_to_watch.append(virt_fd)
+
         try:
-            for event in device.read_loop():
-                if not self._running:
+            while self._running:
+                try:
+                    readable, _, _ = select.select(fds_to_watch, [], [], 0.1)
+                except (ValueError, OSError):
                     break
 
-                # Hot path - minimal processing for lowest input lag
-                if event.type == EV_KEY:
-                    code = event.code
-                    pressed = event.value == 1
-                    
-                    if code not in btn_map:
-                        continue
-                    
-                    prev_state = btn_state.get(code)
-                    if prev_state == pressed:
-                        continue
-                    
-                    btn_state[code] = pressed
-                    vcode = btn_map[code]
-                    val = 1 if pressed else 0
-                    write_event(EV_KEY, vcode, val)
-                    sync()
+                if phys_fd in readable:
+                    try:
+                        for event in device.read(timeout=0):
+                            if not self._running:
+                                break
 
-                elif event.type == EV_ABS:
-                    code = event.code
-                    
-                    if code == EV_ABS_HAT0X or code == EV_ABS_HAT0Y:
-                        vcode = abs_map.get(code)
-                        if vcode is None:
-                            continue
-                        if axis_state.get(code) == event.value:
-                            continue
-                        axis_state[code] = event.value
-                        write_event(EV_ABS, vcode, event.value)
-                        sync()
-                    else:
-                        result = mapper.map_axis(code, event.value)
-                        if result:
-                            vcode, val = result
-                            write_event(EV_ABS, vcode, val)
-                            sync()
+                            if event.type == EV_KEY:
+                                code = event.code
+                                pressed = event.value == 1
+
+                                if code not in btn_map:
+                                    continue
+
+                                prev_state = btn_state.get(code)
+                                if prev_state == pressed:
+                                    continue
+
+                                btn_state[code] = pressed
+                                vcode = btn_map[code]
+                                val = 1 if pressed else 0
+                                write_event(EV_KEY, vcode, val)
+                                sync()
+
+                            elif event.type == EV_ABS:
+                                code = event.code
+
+                                if code == EV_ABS_HAT0X or code == EV_ABS_HAT0Y:
+                                    vcode = abs_map.get(code)
+                                    if vcode is None:
+                                        continue
+                                    if axis_state.get(code) == event.value:
+                                        continue
+                                    axis_state[code] = event.value
+                                    write_event(EV_ABS, vcode, event.value)
+                                    sync()
+                                else:
+                                    result = mapper.map_axis(code, event.value)
+                                    if result:
+                                        vcode, val = result
+                                        write_event(EV_ABS, vcode, val)
+                                        sync()
+                    except OSError:
+                        break
+
+                if virt_fd in readable:
+                    try:
+                        for event in vdev._uinput.read(timeout=0):
+                            if event.type == EV_FF:
+                                try:
+                                    device.write(EV_FF, event.code, event.value)
+                                    device.syn()
+                                except OSError:
+                                    pass
+                    except OSError:
+                        pass
 
         except OSError as ex:
             logger.warning(f"Device read error: {ex}")

@@ -47,7 +47,7 @@ class ControllerSlot(QObject):
         default_name = pm.get_current_profile_name() or "Default"
         self._profile = pm.load_profile(default_name)
 
-        self._virtual_device = VirtualDevice(self._profile.device_type)
+        self._virtual_device = VirtualDevice(self._profile.device_type, slot_id=self._slot_id)
         self._input_mapper = InputMapper(self._profile)
         self._led_controller = LEDController()
         self._worker = WorkerThread()

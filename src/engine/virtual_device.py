@@ -12,6 +12,8 @@ from ..constants import (
 
 logger = logging.getLogger(__name__)
 
+INPUT_PROP_GAMEPAD = 0x05
+
 
 class VirtualDeviceType(Enum):
     XBOX = "xbox"
@@ -19,8 +21,9 @@ class VirtualDeviceType(Enum):
 
 
 class VirtualDevice:
-    def __init__(self, device_type: VirtualDeviceType = VirtualDeviceType.XBOX):
+    def __init__(self, device_type: VirtualDeviceType = VirtualDeviceType.XBOX, slot_id: int = 0):
         self.device_type = device_type
+        self._slot_id = slot_id
         self._uinput: Optional[UInput] = None
         self._caps, self._name, self._vendor, self._product, self._version = \
             self._build_capabilities()
@@ -29,10 +32,12 @@ class VirtualDevice:
         caps = {
             e.EV_KEY: [],
             e.EV_ABS: [],
+            e.EV_FF: [e.FF_RUMBLE],
         }
 
         if self.device_type == VirtualDeviceType.XBOX:
             caps[e.EV_KEY] = [
+                e.BTN_GAMEPAD,
                 e.BTN_A, e.BTN_B, e.BTN_X, e.BTN_Y,
                 e.BTN_TL, e.BTN_TR,
                 e.BTN_THUMBL, e.BTN_THUMBR,
@@ -56,6 +61,7 @@ class VirtualDevice:
 
         else:  # PS4 / DS4
             caps[e.EV_KEY] = [
+                e.BTN_GAMEPAD,
                 e.BTN_SOUTH, e.BTN_EAST, e.BTN_NORTH, e.BTN_WEST,
                 e.BTN_TL, e.BTN_TR,
                 e.BTN_THUMBL, e.BTN_THUMBR,
@@ -75,7 +81,7 @@ class VirtualDevice:
                 (e.ABS_HAT0X, AbsInfo(0, -1, 1, 0, 0, 0)),
                 (e.ABS_HAT0Y, AbsInfo(0, -1, 1, 0, 0, 0)),
             ]
-            name = "Sony Interactive Entertainment DualShock 4"
+            name = "Sony Interactive Entertainment Wireless Controller"
             vendor, product, version = 0x054c, 0x09cc, 0x0100
 
         return caps, name, vendor, product, version
@@ -88,8 +94,12 @@ class VirtualDevice:
                 vendor=self._vendor,
                 product=self._product,
                 version=self._version,
+                bustype=0x03,
+                phys=f"ds4linux-uinput-{self._slot_id}",
+                input_props=[INPUT_PROP_GAMEPAD],
+                max_effects=4,
             )
-            logger.info(f"Created virtual device: {self._name}")
+            logger.info(f"Created virtual device: {self._name} (bustype=USB, phys=ds4linux-uinput-{self._slot_id})")
             return True
         except Exception as e:
             logger.error(f"Failed to create virtual device: {e}")
@@ -124,6 +134,12 @@ class VirtualDevice:
 
     def is_active(self) -> bool:
         return self._uinput is not None
+
+    @property
+    def uinput_fd(self) -> int:
+        if self._uinput:
+            return self._uinput.fd
+        return -1
 
     def set_device_type(self, device_type: VirtualDeviceType):
         if device_type != self.device_type:
