@@ -394,10 +394,10 @@ class LEDController:
             except (OSError, RuntimeError):
                 return None
 
-            # Path looks like: .../hci0:1/0005:054C:05C4.001A/input/input185
-            # LED symlinks point to: .../hci0:1/0005:054C:05C4.001A
-            # We need to go up 2 levels from resolved_input
-            hid_device = resolved_input.parent.parent  # Skip /input/input185
+            # Path looks like: .../0005:054C:05C4.001D/input/input218/event19
+            # LED symlinks point to: .../0005:054C:05C4.001D
+            # We need to go up 3 levels from resolved_input
+            hid_device = resolved_input.parent.parent.parent  # Skip /event19, /input218, /input
 
             # Search for LED directories pointing to this HID device
             for entry in SYS_LEDS_BASE.iterdir():
