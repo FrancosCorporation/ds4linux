@@ -230,7 +230,7 @@ class VirtualDeviceType(Enum):
 
 
 APP_NAME = "DS4Linux"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.2.0"
 ORG_NAME = "DS4Linux"
 ORG_DOMAIN = "ds4linux.app"
 
