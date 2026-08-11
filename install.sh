@@ -121,7 +121,7 @@ create_desktop_entry() {
     mkdir -p "$DESKTOP_DIR"
     cat > "$DESKTOP_DIR/ds4linux.desktop" << EOF
 [Desktop Entry]
-Version=1.0
+Version=1.2
 Type=Application
 Name=DS4Linux
 GenericName=DualShock 4 Emulator
