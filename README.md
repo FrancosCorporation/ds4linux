@@ -7,6 +7,7 @@
 - **Multi-controller support** - Up to 2 DS4 controllers simultaneously (USB/Bluetooth)
 - **Xbox 360 / XInput emulation** - Play any game with native Xbox controller support
 - **PlayStation 4 / DS4 emulation** - Native PS4 support for Steam and compatible games
+- **Proton/Wine compatibility** - Virtual device with USB bustype, INPUT_PROP_GAMEPAD, BTN_GAMEPAD for AAA games via Heroic/Lutris/Proton
 - **Zero sudo required** - udev rules grant user-space access to controller and uinput
 - **Exclusive device grab** - Prevents double input (both physical + virtual)
 - **LED lightbar control** - Full RGB control with brightness, presets, battery gradient, per-profile colors
@@ -15,7 +16,7 @@
 - **Visual button mapping** - DS4 outline with clickable mapping list
 - **Touchpad configuration** - Mouse mode, controls mode, gestures, jitter compensation
 - **Gyro support** - Mouse emulation, sensitivity, calibration
-- **Rumble configuration** - Heavy/light motor control
+- **Rumble forwarding** - EV_FF/FF_RUMBLE from games forwarded to physical controller via select()-based async I/O
 - **System tray integration** - Minimize to tray, runs in background
 - **Dark/Minimalist UI** - DS4Windows-inspired PySide6 interface (Controllers table, Profile tabs)
 - **Background daemon** - QThread-based event loop, never blocks GUI
@@ -141,12 +142,23 @@ python3 -m src.main
 
 ## Virtual Device Types
 
-| Type | Vendor:Product | Use Case |
-|------|----------------|----------|
-| Xbox 360 | 045e:028e | XInput games, Steam, most native Linux games |
-| PS4 / DS4 | 054c:09cc | Steam (PS4 support), PlayStation Now, Remote Play |
+| Type | Vendor:Product | Bustype | Features |
+|------|----------------|---------|----------|
+| Xbox 360 | 045e:028e | USB (0x03) | BTN_GAMEPAD, INPUT_PROP_GAMEPAD, EV_FF rumble |
+| PS4 / DS4 | 054c:09cc | USB (0x03) | BTN_GAMEPAD, INPUT_PROP_GAMEPAD, EV_FF rumble |
 
 *Each controller slot can independently emulate Xbox or PS4*
+
+### Proton/Wine Compatibility
+
+Virtual devices are created with characteristics expected by Windows game APIs running under Proton/Wine:
+- **USB bustype** (0x03) - Required by SDL/XInput device enumeration
+- **INPUT_PROP_GAMEPAD** - Kernel property flag for gamepad recognition
+- **BTN_GAMEPAD** - Standard gamepad button code for input mapping
+- **phys=ds4linux-uinput-\<slot\>** - Unique physical address per slot, prevents self-detection by the monitor
+- **EV_FF/FF_RUMBLE** - Force feedback events from games are forwarded to the physical controller
+
+Start DS4Linux **before** launching your game via Heroic, Lutris, or Proton.
 
 ## Configuration
 
@@ -195,6 +207,16 @@ python3 -m src.main
 **LED not working:**
 - Requires kernel 5.10+ with `hid_playstation` module
 - Check: `ls /sys/class/leds/` for `*::kbd_backlight` or similar
+
+**Game doesn't recognize controller (Proton/Wine):**
+- Start DS4Linux **before** launching the game
+- Disable Steam Input if using Steam
+- Try switching virtual device type (Xbox/PS4) in profile
+- Check `evtest /dev/input/eventXX` - virtual device should show `bustype=0x3` and `BTN_GAMEPAD`
+
+**Rumble not working:**
+- Ensure game is not running through Steam Input (which intercepts FF)
+- Test with `evtest` - write FF event to virtual node, check physical output
 
 **Qt platform plugin error (xcb):**
 - Install: `sudo apt install libxcb-cursor0` (Ubuntu/Debian)
