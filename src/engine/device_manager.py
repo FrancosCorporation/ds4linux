@@ -2,6 +2,7 @@
 
 from pathlib import Path
 from typing import Optional
+import os
 
 from evdev import InputDevice
 
@@ -29,4 +30,28 @@ class DeviceManager:
         for led in SYS_LEDS_BASE.glob(f"*{name}*"):
             if led.is_dir():
                 return led
+        return None
+
+    @staticmethod
+    def get_hid_device() -> Optional[int]:
+        """
+        Returns the HID device file descriptor (int) for the currently
+        connected DS4 controller (hidraw3), or None if no DS4 controller
+        is available.
+        """
+        from ..constants import HIDRAW_BASE
+        import glob
+
+        # Check for DS4 via HIDRAW path — there should be only one DS4 HIDRAW device
+        for p in glob.glob(f"{HIDRAW_BASE}*/device/uevent"):
+            try:
+                with open(p, "r") as f:
+                    content = f.read()
+                if "HID_NAME=Wireless Controller" in content and \
+                   "HID_UNIQ=f0:f7:9e:95:76:a0" in content:
+                    hidraw_path = Path(p).parent
+                    hidraw_fd = os.open(str(hidraw_path), os.O_RDWR)
+                    return hidraw_fd
+            except (OSError, IOError, IndexError):
+                continue
         return None

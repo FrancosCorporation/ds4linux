@@ -21,6 +21,9 @@ class WorkerThread(QThread):
     device_disconnected = Signal()
     battery_update = Signal(int)
     log_message = Signal(str)
+    # Emits (event_type, code, value) for raw input events — used by
+    # mapping listen mode and wizard without interfering with normal mapping.
+    raw_event = Signal(int, int, int)
 
     def __init__(self):
         super().__init__()
@@ -109,6 +112,10 @@ class WorkerThread(QThread):
                         for event in device.read(timeout=0):
                             if not self._running:
                                 break
+
+                            # Emit raw event for UI listen mode / wizard
+                            if event.type in (EV_KEY, EV_ABS):
+                                self.raw_event.emit(event.type, event.code, event.value)
 
                             if event.type == EV_KEY:
                                 code = event.code

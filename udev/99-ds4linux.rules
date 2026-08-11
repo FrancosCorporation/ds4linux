@@ -2,35 +2,35 @@
 # Allow non-root access to DualShock 4 controllers
 # Place this file in /etc/udev/rules.d/99-ds4linux.rules
 # Then run: sudo udevadm control --reload-rules && sudo udevadm trigger
+#
+# Supports both hid-sony (older kernels) and hid-playstation (kernel 6.2+)
 
-# --- HID Device Access (evdev) ---
-# DualShock 4 (USB) PID 09cc
-KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="09cc", GROUP="input", MODE="0660", TAG+="uaccess"
-# DualShock 4 (Bluetooth dongle) PID 0ba0
-KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="0ba0", GROUP="input", MODE="0660", TAG+="uaccess"
-# DualShock 4 (Bluetooth direct) PID 05c4
-KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="05c4", GROUP="input", MODE="0660", TAG+="uaccess"
-
-# --- Hidraw Access ---
+# --- HIDRAW Access (for LED output reports) ---
+# DS4 Bluetooth (PID 09cc)
 SUBSYSTEM=="hidraw", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="09cc", MODE="0666", TAG+="uaccess"
-SUBSYSTEM=="hidraw", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="09cc", GROUP="input", MODE="0660"
-
+# DS4 Bluetooth dongle (PID 0ba0)
 SUBSYSTEM=="hidraw", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="0ba0", MODE="0666", TAG+="uaccess"
-SUBSYSTEM=="hidraw", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="0ba0", GROUP="input", MODE="0660"
-
+# DS4 USB / DualSense (PID 05c4)
 SUBSYSTEM=="hidraw", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="05c4", MODE="0666", TAG+="uaccess"
-SUBSYSTEM=="hidraw", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="05c4", GROUP="input", MODE="0660"
 
-# --- Uinput Access ---
-KERNEL=="uinput", MODE="0666", GROUP="input", TAG+="uaccess"
+# --- Input Devices (evdev) ---
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="09cc", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="0ba0", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="05c4", MODE="0660", TAG+="uaccess"
 
-# --- LED Sysfs Access ---
-# Match LED devices whose parent HID device has Sony vendor ID
-SUBSYSTEM=="leds", ATTRS{idVendor}=="054c", GROUP="input", MODE="0660", TAG+="uaccess"
+# --- Uinput Access (virtual device creation) ---
+KERNEL=="uinput", MODE="0666", TAG+="uaccess"
 
-# Fallback: Match DS4 LED entries by kernel name pattern
-# DS4 LEDs use naming like inputNN:red, inputNN:green, inputNN:blue, inputNN:global
-SUBSYSTEM=="leds", KERNEL=="input[0-9]*:red", GROUP="input", MODE="0660", TAG+="uaccess"
-SUBSYSTEM=="leds", KERNEL=="input[0-9]*:green", GROUP="input", MODE="0660", TAG+="uaccess"
-SUBSYSTEM=="leds", KERNEL=="input[0-9]*:blue", GROUP="input", MODE="0660", TAG+="uaccess"
-SUBSYSTEM=="leds", KERNEL=="input[0-9]*:global", GROUP="input", MODE="0660", TAG+="uaccess"
+# --- LED Sysfs Access (hid-playstation + hid-sony drivers) ---
+# Genérica: qualquer LED ligado a dispositivo Sony
+SUBSYSTEM=="leds", ATTRS{idVendor}=="054c", MODE="0666", TAG+="uaccess"
+
+# Fallback por padrão de nome — drivers hid-sony e hid-playstation
+# Formato antigo (hid-sony): inputNN:red, inputNN:green, inputNN:blue, inputNN:global
+SUBSYSTEM=="leds", KERNEL=="input*:red", MODE="0666", TAG+="uaccess"
+SUBSYSTEM=="leds", KERNEL=="input*:green", MODE="0666", TAG+="uaccess"
+SUBSYSTEM=="leds", KERNEL=="input*:blue", MODE="0666", TAG+="uaccess"
+SUBSYSTEM=="leds", KERNEL=="input*:global", MODE="0666", TAG+="uaccess"
+
+# Formato novo (hid-playstation kernel 6.2+): inputNN:rgb:indicator
+SUBSYSTEM=="leds", KERNEL=="input*:rgb:*", MODE="0666", TAG+="uaccess"

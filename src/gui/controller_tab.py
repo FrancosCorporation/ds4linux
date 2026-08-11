@@ -20,6 +20,7 @@ from ..engine.input_mapper import ProfileConfig, AxisConfig, TriggerConfig
 from ..engine.virtual_device import VirtualDeviceType as VDT
 from ..config.profile_manager import ProfileManager
 from .color_dialog import ColorDialog
+from .mapping_tab import MappingTabWidget
 
 logger = logging.getLogger(__name__)
 
@@ -98,16 +99,19 @@ class ControllerVisualWidget(QWidget):
 
         # Shoulders / Triggers
         p.setBrush(QBrush(QColor("#00cccc")) if self._mappings else QBrush(QColor("#00d4aa")))
-        p.drawRoundedRect(QRectF(15, 12, 90, 16), 8, 8)
-        p.drawRoundedRect(QRectF(w - 105, 12, 90, 16), 8, 8)
+        p.drawRoundedRect(QRectF(12, 10, 85, 14), 7, 7)
+        p.drawRoundedRect(QRectF(w - 97, 10, 85, 14), 7, 7)
         p.setPen(QPen(QColor("#1e1e2e"), 1))
-        p.drawText(QRectF(15, 12, 90, 16), Qt.AlignCenter, "L1")
-        p.drawText(QRectF(w - 105, 12, 90, 16), Qt.AlignCenter, "R1")
+        p.drawText(QRectF(12, 10, 85, 14), Qt.AlignCenter, "L1")
+        p.drawText(QRectF(w - 97, 10, 85, 14), Qt.AlignCenter, "R1")
 
-        p.drawRoundedRect(QRectF(15, 0, 90, 18), 8, 8)
-        p.drawRoundedRect(QRectF(w - 105, 0, 90, 18), 8, 8)
-        p.drawText(QRectF(15, 0, 90, 18), Qt.AlignCenter, "L2")
-        p.drawText(QRectF(w - 105, 0, 90, 18), Qt.AlignCenter, "R2")
+        # L2 / R2 triggers (more prominent)
+        p.setBrush(QBrush(QColor("#00cccc")) if self._mappings else QBrush(QColor("#00d4aa")))
+        p.drawRoundedRect(QRectF(10, 0, 80, 16), 8, 8)
+        p.drawRoundedRect(QRectF(w - 90, 0, 80, 16), 8, 8)
+        p.setPen(QPen(QColor("#1e1e2e"), 1))
+        p.drawText(QRectF(10, 0, 80, 16), Qt.AlignCenter, "L2")
+        p.drawText(QRectF(w - 90, 0, 80, 16), Qt.AlignCenter, "R2")
 
 
 class AxisConfigWidget(QWidget):
@@ -131,7 +135,9 @@ class AxisConfigWidget(QWidget):
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
-        layout.setSpacing(12)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(14)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         # — LS/RS —
         grp = QGroupBox("LS / RS")
@@ -342,7 +348,9 @@ class LightbarWidget(QWidget):
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
-        layout.setSpacing(12)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(14)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         # Color preview
         self.preview = QFrame()
@@ -425,7 +433,9 @@ class TouchpadWidget(QWidget):
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
-        layout.setSpacing(8)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(10)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         mode_grp = QGroupBox("Touchpad Mode")
         mode_layout = QVBoxLayout(mode_grp)
@@ -483,7 +493,9 @@ class GyroWidget(QWidget):
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(12)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         grp = QGroupBox("Gyro")
         gl = QVBoxLayout(grp)
@@ -519,7 +531,9 @@ class OtherWidget(QWidget):
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(12)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         # Rumble
         rumble_grp = QGroupBox("Rumble")
@@ -579,7 +593,8 @@ class ProfileTabWidget(QWidget):
     # ------------------------------------------------------------------
     def _setup_ui(self):
         layout = QVBoxLayout(self)
-        layout.setSpacing(8)
+        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setSpacing(6)
 
         # Header – profile name + device type + save/cancel
         header = QHBoxLayout()
@@ -608,15 +623,21 @@ class ProfileTabWidget(QWidget):
         dt_layout.addStretch()
         layout.addLayout(dt_layout)
 
-        # Sub-tabs
+        # Sub-tabs in scroll area
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.sub_tabs = QTabWidget()
-        layout.addWidget(self.sub_tabs, 1)
+        scroll.setWidget(self.sub_tabs)
+        layout.addWidget(scroll, 1)
 
         self._create_controls_tab()
 
         # Special Actions (placeholder)
         sp = QFrame()
         sp_layout = QVBoxLayout(sp)
+        sp_layout.setContentsMargins(20, 20, 20, 20)
         sp_layout.addWidget(QLabel("Special Actions / Macros – Coming Soon"))
         sp_layout.addStretch()
         self.sub_tabs.addTab(sp, "Special Actions")
@@ -624,6 +645,7 @@ class ProfileTabWidget(QWidget):
         # Controller Readings (placeholder)
         cr = QFrame()
         cr_layout = QVBoxLayout(cr)
+        cr_layout.setContentsMargins(20, 20, 20, 20)
         cr_layout.addWidget(QLabel("Controller Readings – Live input display"))
         cr_layout.addStretch()
         self.sub_tabs.addTab(cr, "Controller Readings")
@@ -642,16 +664,20 @@ class ProfileTabWidget(QWidget):
     def _create_controls_tab(self):
         controls_widget = QWidget()
         controls_layout = QHBoxLayout(controls_widget)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        controls_layout.setSpacing(12)
 
-        # Left: visual + mappings + touchpad
+        # Left: Mapping overlay + visual + touchpad
         left = QVBoxLayout()
-        self.visual = ControllerVisualWidget()
-        left.addWidget(self.visual)
+        left.setSpacing(10)
 
-        self.mapping_list = QListWidget()
-        self.mapping_list.setMaximumHeight(200)
-        self.mapping_list.itemClicked.connect(self._on_mapping_clicked)
-        left.addWidget(self.mapping_list)
+        self.mapping_tab = MappingTabWidget()
+        self.mapping_tab.mappings_changed.connect(self._on_mappings_changed)
+        left.addWidget(self.mapping_tab)
+
+        self.visual = ControllerVisualWidget()
+        self.visual.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        left.addWidget(self.visual)
 
         self.touchpad = TouchpadWidget()
         left.addWidget(self.touchpad)
@@ -660,6 +686,7 @@ class ProfileTabWidget(QWidget):
 
         # Right: Axis Config | Lightbar | Gyro | Other
         self.right_tabs = QTabWidget()
+        self.right_tabs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.axis_config = AxisConfigWidget()
         self.lightbar = LightbarWidget()
         self.gyro = GyroWidget()
@@ -678,6 +705,7 @@ class ProfileTabWidget(QWidget):
         self.stop_btn.clicked.connect(self._stop_controller)
         self.lightbar.color_changed.connect(self._on_lightbar_color_changed)
         self.lightbar.brightness_slider.valueChanged.connect(self._on_lightbar_brightness_changed)
+        self.mapping_tab.mappings_changed.connect(self._on_mappings_changed)
 
         # axis config signals
         for spins in self.axis_config.ls_rs_spins.values():
@@ -710,35 +738,13 @@ class ProfileTabWidget(QWidget):
         self.lightbar.set_color(QColor(*self._current_profile.led_color))
         self.lightbar.set_brightness(self._current_profile.led_brightness)
 
-        self._update_mapping_list()
+        # Load mappings into the overlay
+        self.mapping_tab.set_mappings(self._current_profile.button_maps)
+        self.visual.set_mappings(self._current_profile.button_maps)
+
         self.status_label.setText(
             f"Controller {self.slot_id + 1} is using Profile \"{self._current_profile.name}\""
         )
-
-    def _update_mapping_list(self):
-        self.mapping_list.clear()
-        if not self._current_profile:
-            return
-
-        btn_names = {}
-        for enum_cls in (DS4Btn, XboxBtn, PS4Btn):
-            for member in enum_cls:
-                btn_names[member.value] = member.name
-
-        for phys, virt in self._current_profile.button_maps.items():
-            phys_name = btn_names.get(phys, f"0x{phys:03X}")
-            virt_name = btn_names.get(virt, f"0x{virt:03X}")
-            item = QListWidgetItem(f"{phys_name} → {virt_name}")
-            item.setData(Qt.UserRole, (phys, virt))
-            self.mapping_list.addItem(item)
-        self.visual.set_mappings(self._current_profile.button_maps)
-
-    def _on_mapping_clicked(self, item: QListWidgetItem):
-        data = item.data(Qt.UserRole)
-        if data:
-            phys, virt = data
-            # Here you could open a "press key to remap" dialog
-            logger.info(f"Mapping clicked: phys={phys}, virt={virt}")
 
     # ------------------------------------------------------------------
     # Save / cancel
@@ -755,6 +761,9 @@ class ProfileTabWidget(QWidget):
         self._current_profile.right_stick = rs
         self._current_profile.left_trigger = lt
         self._current_profile.right_trigger = rt
+
+        # Get mappings from the overlay
+        self._current_profile.button_maps = self.mapping_tab.get_mappings()
 
         color = self.lightbar.get_color()
         self._current_profile.led_color = (color.red(), color.green(), color.blue())
@@ -791,6 +800,11 @@ class ProfileTabWidget(QWidget):
         self._current_profile.right_stick = rs
         self._current_profile.left_trigger = lt
         self._current_profile.right_trigger = rt
+
+    def _on_mappings_changed(self, mappings: Dict[int, int]):
+        """Called when mappings are added/removed via the overlay."""
+        if self._current_profile:
+            self._current_profile.button_maps = mappings
 
     def _on_lightbar_color_changed(self, color: QColor):
         if self._current_profile:

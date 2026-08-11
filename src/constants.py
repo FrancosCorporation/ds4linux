@@ -213,12 +213,27 @@ MAX_TRIGGER_VALUE = 255
 PROFILE_DIR = Path.home() / ".config" / "ds4linux" / "profiles"
 CONFIG_FILE = Path.home() / ".config" / "ds4linux" / "config.json"
 
-UDEV_RULE_CONTENT = '''# DS4Linux udev rules
-# Allow non-root access to DualShock 4 controllers
-SUBSYSTEM=="hidraw", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="09cc", MODE="0666"
-SUBSYSTEM=="hidraw", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="0ba0", MODE="0666"
-# Allow uinput access for virtual device creation
-KERNEL=="uinput", MODE="0666", GROUP="input"
+UDEV_RULE_CONTENT = '''# DS4Linux udev rules — supports hid-sony and hid-playstation drivers
+# Install: sudo cp 99-ds4linux.rules /etc/udev/rules.d/ && sudo udevadm control --reload-rules && sudo udevadm trigger
+
+# HIDRAW (LED output reports)
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="09cc", MODE="0666", TAG+="uaccess"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="0ba0", MODE="0666", TAG+="uaccess"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="05c4", MODE="0666", TAG+="uaccess"
+
+# Input (evdev)
+KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="054c", MODE="0660", TAG+="uaccess"
+
+# Uinput (virtual device)
+KERNEL=="uinput", MODE="0666", TAG+="uaccess"
+
+# LED sysfs — hid-playstation (input*:rgb:*) and hid-sony (input*:red/green/blue/global)
+SUBSYSTEM=="leds", ATTRS{idVendor}=="054c", MODE="0666", TAG+="uaccess"
+SUBSYSTEM=="leds", KERNEL=="input*:red", MODE="0666", TAG+="uaccess"
+SUBSYSTEM=="leds", KERNEL=="input*:green", MODE="0666", TAG+="uaccess"
+SUBSYSTEM=="leds", KERNEL=="input*:blue", MODE="0666", TAG+="uaccess"
+SUBSYSTEM=="leds", KERNEL=="input*:global", MODE="0666", TAG+="uaccess"
+SUBSYSTEM=="leds", KERNEL=="input*:rgb:*", MODE="0666", TAG+="uaccess"
 '''
 
 VIRTUAL_DEVICE_TYPES = ("xbox", "ps4")
@@ -235,3 +250,5 @@ ORG_NAME = "DS4Linux"
 ORG_DOMAIN = "ds4linux.app"
 
 MAX_CONTROLLERS = 2
+
+DS4_OUTPUT_REPORT_BT = 0x11

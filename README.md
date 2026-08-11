@@ -10,7 +10,7 @@
 - **Proton/Wine compatibility** - Virtual device with USB bustype, INPUT_PROP_GAMEPAD, BTN_GAMEPAD for AAA games via Heroic/Lutris/Proton
 - **Zero sudo required** - udev rules grant user-space access to controller and uinput
 - **Exclusive device grab** - Prevents double input (both physical + virtual)
-- **LED lightbar control** - Full RGB control with brightness, presets, battery gradient, per-profile colors
+- **LED lightbar control** - Full RGB control via HID output reports (78 bytes, BT format) + sysfs brightness for virtual display
 - **Advanced stick/trigger tuning** - Deadzone, max zone, anti-deadzone, sensitivity, output curve, square stick, rotation
 - **Per-controller profiles** - Independent profiles per controller slot (JSON)
 - **Visual button mapping** - DS4 outline with clickable mapping list
@@ -25,27 +25,90 @@
 
 ```
 ds4linux/
-├── udev/                    # udev rules for non-root access
-├── assets/                  # Icons, controller images
+├── udev/                          # udev rules for non-root access
+│   └── 99-ds4linux.rules          # Controller + uinput + LED permissions
+├── assets/                        # Icons, controller images
 ├── src/
-│   ├── constants.py         # Centralized evdev/uinput codes
-│   ├── engine/
-│   │   ├── device_manager.py     # DS4 detection & grab()
-│   │   ├── led_controller.py     # /sys/class/leds/ RGB control
-│   │   ├── virtual_device.py     # uinput device factory (Xbox/PS4)
-│   │   ├── input_mapper.py       # DS4 → virtual translation
-│   │   ├── worker_thread.py      # QThread read_loop per controller
-│   │   ├── controller_slot.py    # Per-controller state (device, virtual, mapper, LED)
-│   │   └── multi_device_manager.py # Manages up to 2 controller slots
+│   ├── constants.py               # evdev/uinput codes, button maps, axis maps, version
+│   │
+│   ├── engine/                    # Core input processing engine
+│   │   ├── device_monitor.py      # pyudev hot-plug detection (add/remove DS4 via udev netlink)
+│   │   ├── device_manager.py      # Scans /dev/input, filters real DS4 (VID/PID), calls grab()
+│   │   ├── controller_slot.py     # Per-controller state machine: attach/detach, LED, profile, worker lifecycle
+│   │   ├── worker_thread.py       # QThread: select()-based I/O on physical fd + uinput fd
+│   │   │                          #   → maps buttons/axes physical→virtual (EV_KEY, EV_ABS)
+│   │   │                          #   → forwards rumble virtual→physical (EV_FF → device.write)
+│   │   ├── virtual_device.py      # UInput factory: Xbox 360 / PS4 emulation
+│   │   │                          #   → bustype=USB, INPUT_PROP_GAMEPAD, BTN_GAMEPAD, EV_FF/FF_RUMBLE
+│   │   │                          #   → phys=ds4linux-uinput-<slot> (prevents monitor self-detection)
+│   │   ├── input_mapper.py        # DS4→virtual translation: deadzone, sensitivity, anti-deadzone,
+│   │   │                          #   output curve, square stick, rotation per stick/trigger
+│   │   ├── led_controller.py      # /sys/class/leds/ RGB control (virtual display) + HID output report (78 bytes) for physical LED
+│   │   │                          #   LED path via sysfs device symlink matching
+│   │   └── multi_device_manager.py # Manages 2 slots, HID parent grouping (gamepad+sensors+touchpad),
+│   │                              #   device assignment, reconnect on BT change
+│   │
 │   ├── config/
-│   │   └── profile_manager.py    # JSON profile persistence
-│   └── gui/
-│       ├── main_window.py        # Main window with Controllers/Profiles/Auto Profiles/Settings/Log tabs
-│       ├── color_dialog.py       # HSV color picker
-│       └── styles.py             # QSS Dark theme
-├── install.sh                 # System installer (udev, .desktop, venv)
-├── requirements.txt           # Python dependencies
+│   │   └── profile_manager.py     # JSON profile CRUD in ~/.config/ds4linux/profiles/
+│   │                              #   Per-slot independent profiles with button_maps, axis config,
+│   │                              #   LED color/brightness, device type, touchpad/gyro settings
+│   │
+│   └── gui/                       # PySide6 dark UI (DS4Windows-inspired)
+│       ├── main_window.py         # Tab container: Controllers, Profiles, Auto Profiles, Settings, Log
+│       │                          #   SVG icon loading, system tray, about dialog
+│       ├── controllers_table.py   # Table view: slot ID, status, battery, profile combo, LED color cell,
+│       │                          #   edit button → opens ControllerTab
+│       ├── controller_tab.py      # Per-controller profile editor:
+│       │                          #   MappingTabWidget (overlay interativo + wizard)
+│       │                          #   LightbarWidget (HSV picker, presets, brightness slider)
+│       │                          #   AxisConfigWidget (LS/RS/L2/R2 spinboxes, curves, square stick)
+│       │                          #   TouchpadWidget, GyroWidget, OtherWidget
+│       │                          #   Profile load/save/cancel, device type switch
+│       ├── mapping_tab.py         # Nova interface de mapeamento:
+│       │                          #   ControllerOverlayWidget (imagem + botões transparentes)
+│       │                          #   ListenDialog (captura evento bruto do evdev)
+│       │                          #   MappingWizardDialog (wizard passo-a-passo)
+│       ├── color_dialog.py        # Custom HSV color wheel dialog (ported from DS4Windows C#)
+│       ├── visual_mapping.py      # DS4 SVG outline with clickable button regions
+│       └── styles.py              # QSS dark theme: #1e1e2e bg, #00d4aa accent, rounded corners
+│
+├── install.sh                     # System installer:
+│   │                              #   → apt/pip dependencies, venv, udev rules
+│   │                              #   → SVG→PNG icon conversion (QtSvg), desktop entry
+│   │                              #   → /usr/local/bin/ds4linux launcher script
+│   │                              #   → chown/chmod existing LED sysfs (udevadm trigger doesn't reapply)
+├── requirements.txt               # python-evdev, PySide6, pyudev
+├── setup.py                       # Package metadata
 └── README.md
+```
+
+### Data Flow
+
+```
+DS4 (USB/BT)                    DS4Linux                          Game (Proton/Wine)
+─────────────                   ──────────                        ──────────────────
+ event18 (gamepad) ──grab()──→ worker_thread
+ event19 (sensors)              │ read_loop()
+ event20 (touchpad)             │
+                                ├── EV_KEY/EV_ABS ──→ input_mapper ──→ virtual_device.write()
+                                │   (DS4 buttons)      (mapping)       (EV_KEY/EV_ABS to uinput)
+                                │                                         │
+                                │                                         ▼
+                                │                                   /dev/input/event21
+                                │                                   "Sony Interactive
+                                │                                    Entertainment
+                                │                                    Wireless Controller"
+                                │                                         │
+                                │                                    Game reads events
+                                │                                    (buttons, sticks)
+                                │
+                                ├── EV_FF (rumble) ←──── game writes FF ──→ uinput fd
+                                │   select() on uinput_fd                  │
+                                │   device.write(EV_FF, code, value) ─────→ DS4 hardware
+                                │                                         (physical vibration)
+                                │
+                                                                                        └── LED sysfs ──→ /sys/class/leds/input88:{red,green,blue}/brightness (virtual display)
+                                                                                        └── HID output report (78 bytes, BT format, hw_control=0xC4) ──→ physical LED
 ```
 
 ## Quick Start
@@ -237,7 +300,8 @@ python3 -m src.main
 - [x] QThread background event loop (zero GUI lag)
 
 ### v1.1.0 - LED & UI (Done)
-- [x] LED lightbar control via `/sys/class/leds/`
+- [x] LED lightbar control via `/sys/class/leds/` (virtual display)
+- [x] HID output reports (78 bytes, BT format) for physical LED lightbar
 - [x] RGB color picker (HSV)
 - [x] LED presets (solid, pulse, rainbow, battery gradient)
 - [x] Per-profile LED colors
@@ -259,12 +323,18 @@ python3 -m src.main
 - [x] BTN_GAMEPAD explicit capability
 - [x] EV_FF/FF_RUMBLE declaration + force feedback forwarding
 - [x] select()-based async I/O for rumble (physical ↔ virtual)
-- [x] Unique phys per slot (`ds4linux-uinput-<slot>`)
+- [x] Unique phys per slot (ds4linux-uinput-\<slot\>)
 - [x] PS4 name: "Sony Interactive Entertainment Wireless Controller"
+- [x] HID output reports (78 bytes, BT format, hw_control=0xC4) for physical LED lightbar
+- [x] HID output report forwarding for games that bypass evdev
 - [x] README + documentation
 
 ### v1.3.0 - In Progress
-- [ ] **ControllerTab UI refactor** - QScrollArea, QSizePolicy, margin/spacing cleanup, slider redesign, controller diagram L2/R2
+- [x] **ControllerTab UI refactor** - QScrollArea, QSizePolicy, margin/spacing cleanup, slider redesign, controller diagram L2/R2
+- [x] **MappingTab interativo** - Overlay sobre imagem do controle, Listen Mode, Wizard de mapeamento rápido
+- [x] **LEDController multi-fallback** - Detecção hid-sony/hid-playstation, HID report + sysfs colors/brightness
+- [x] **WorkerThread raw_event** - Sinal para captura de eventos brutos pela UI
+- [x] **udev rules corrigidas** - MODE="0666" + TAG+="uaccess" para LEDs e hidraw
 - [ ] **God of War verification** - End-to-end test with Heroic/Proton
 - [ ] **SDL GUID validation** - Confirm virtual device GUID matches expected Xbox/PS4 signatures
 - [ ] **Rumble magnitude mapping** - Proportional forwarding (game sends 0-1 → map to physical 0-255)
