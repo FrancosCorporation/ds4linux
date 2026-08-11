@@ -126,3 +126,38 @@ class DeviceManager:
                     continue
 
         return fds
+
+    @staticmethod
+    def get_hid_device_path(device: InputDevice) -> Optional[Path]:
+        """
+        Returns the HID device path (e.g. /dev/hidraw3) for a specific
+        InputDevice, or None if not found.
+        """
+        # Get the device's unique ID
+        uniq = device.uniq
+        if not uniq:
+            return None
+
+        # Search sysfs for matching HID device
+        hidraw_sysfs = Path("/sys/bus/hid/devices")
+        if hidraw_sysfs.exists():
+            for device_dir in sorted(hidraw_sysfs.iterdir()):
+                if not device_dir.is_dir():
+                    continue
+                uevent_file = device_dir / "uevent"
+                if not uevent_file.exists():
+                    continue
+                try:
+                    content = uevent_file.read_text()
+                    if f"HID_UNIQ={uniq}" in content:
+                        # Found matching HID device, get hidraw
+                        hidraw_dir = device_dir / "hidraw"
+                        if hidraw_dir.exists():
+                            for hidraw_dev in sorted(hidraw_dir.iterdir()):
+                                if hidraw_dev.is_dir():
+                                    hidraw_name = hidraw_dev.name
+                                    return Path(f"/dev/{hidraw_name}")
+                except (OSError, IOError):
+                    continue
+
+        return None

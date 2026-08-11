@@ -137,6 +137,13 @@ class ControllerSlot(QObject):
             self._led_controller.set_led_path(led_path)
             logger.info(f"Found LED path: {led_path}")
 
+        # Find specific HID device for this controller
+        if self._device:
+            hid_path = DeviceManager.get_hid_device_path(self._device)
+            if hid_path:
+                self._led_controller.set_hid_device(hid_path)
+                logger.info(f"Found HID device: {hid_path}")
+
         # Apply LED settings from profile
         self._led_controller.set_color(*self._profile.led_color)
         self._led_controller.set_brightness(self._profile.led_brightness)

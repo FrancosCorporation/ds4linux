@@ -47,6 +47,7 @@ class LEDController:
 
     def __init__(self, led_path: Optional[Path] = None):
         self._led_path: Optional[Path] = None
+        self._hid_device_path: Optional[Path] = None  # Specific hidraw device
         # Old driver (hid-sony) paths
         self._red_path: Optional[Path] = None
         self._green_path: Optional[Path] = None
@@ -175,6 +176,11 @@ class LEDController:
         """Set LED path — the base LED directory (e.g. /sys/class/leds/input171)."""
         self._discover_led_paths(led_path)
 
+    def set_hid_device(self, hid_path: Path):
+        """Set the specific HID device path for this controller (e.g. /dev/hidraw3)."""
+        self._hid_device_path = hid_path
+        logger.info(f"LEDController HID device set to: {hid_path}")
+
     # ------------------------------------------------------------------
     # Color setting — multi-fallback cascade
     # ------------------------------------------------------------------
@@ -230,12 +236,37 @@ class LEDController:
     def _send_hid_report(self, report: bytes) -> bool:
         """Send HID output report to DS4. Returns True on success."""
         try:
-            hid_fd = device_manager.DeviceManager.get_hid_device()
-            if hid_fd is None:
+            # Use specific HID device if set, otherwise find first available
+            if self._hid_device_path:
+                hid_path = self._hid_device_path
+            else:
+                # Fallback: find any HID device
+                hid_devs = device_manager.DeviceManager.get_all_hid_devices()
+                if not hid_devs:
+                    return False
+                hid_path = Path("/dev/hidraw0")  # Will be opened/closed
+                # Find the actual path
+                for fd in hid_devs:
+                    import os
+                    # We can't get path from fd, so just use get_hid_device
+                    pass
+                hid_fd = device_manager.DeviceManager.get_hid_device()
+                if hid_fd is None:
+                    return False
+                os.write(hid_fd, report)
+                os.close(hid_fd)
+                logger.info(f"LED color ({self._current_color[0]},{self._current_color[1]},{self._current_color[2]}) via HID output report")
+                return True
+
+            # Open the specific HID device
+            if not hid_path.exists():
+                logger.warning(f"HID device not found: {hid_path}")
                 return False
-            os.write(hid_fd, report)
-            os.close(hid_fd)
-            logger.info(f"LED color ({self._current_color[0]},{self._current_color[1]},{self._current_color[2]}) via HID output report")
+
+            fd = os.open(str(hid_path), os.O_RDWR)
+            os.write(fd, report)
+            os.close(fd)
+            logger.info(f"LED color ({self._current_color[0]},{self._current_color[1]},{self._current_color[2]}) via {hid_path}")
             return True
         except Exception as e:
             logger.warning(f"HID output report failed: {e}")
