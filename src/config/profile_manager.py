@@ -22,6 +22,7 @@ class ProfileManager(QObject):
         CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
         self._current_profile_name: Optional[str] = None
         self._load_last_used()
+        self.seed_default_profiles()
 
     def _load_last_used(self):
         try:
@@ -112,13 +113,13 @@ class ProfileManager(QObject):
         return self._current_profile_name
 
     def _create_default_profile(self, name: str = "Default") -> ProfileConfig:
+        """Create a default profile with DS4-to-Xbox button mapping."""
         from ..constants import DS4_TO_XBOX_BTN_MAP
         profile = ProfileConfig(
             name=name,
             device_type=VirtualDeviceType.XBOX,
             button_maps=DS4_TO_XBOX_BTN_MAP.copy(),
         )
-        # Save if not already a file
         path = self.get_profile_path(name)
         if not path.exists():
             try:
@@ -128,6 +129,48 @@ class ProfileManager(QObject):
             except Exception as e:
                 logger.error(f"Failed to create default profile {name}: {e}")
         return profile
+
+    def _create_ds4_passthrough_profile(self, name: str = "DS4 Passthrough") -> ProfileConfig:
+        """Create a profile that passes through DS4 button names unchanged (PS4 mode)."""
+        from ..constants import DS4_TO_PS4_BTN_MAP
+        profile = ProfileConfig(
+            name=name,
+            device_type=VirtualDeviceType.PS4,
+            button_maps=DS4_TO_PS4_BTN_MAP.copy(),
+            led_color=(0, 212, 170),  # Default teal
+        )
+        path = self.get_profile_path(name)
+        if not path.exists():
+            try:
+                data = self._profile_to_dict(profile)
+                with open(path, "w") as f:
+                    json.dump(data, f, indent=2)
+                logger.info(f"Created profile: {name}")
+                self.profiles_changed.emit()
+            except Exception as e:
+                logger.error(f"Failed to create profile {name}: {e}")
+        return profile
+
+    def seed_default_profiles(self):
+        """Create the two default profiles on first launch or if they're missing.
+        
+        Profile 1: "Default" - DS4 → Xbox 360 button mapping
+        Profile 2: "DS4 Passthrough" - DS4 → PS4 button mapping (native names)
+        """
+        profiles_to_create = [
+            ("Default", self._create_default_profile),
+            ("DS4 Passthrough", self._create_ds4_passthrough_profile),
+        ]
+
+        for name, creator in profiles_to_create:
+            path = self.get_profile_path(name)
+            if not path.exists():
+                creator(name)
+
+        # Set Default as current if none exists
+        if not self._current_profile_name:
+            self._current_profile_name = "Default"
+            self._save_last_used()
 
     def _profile_to_dict(self, profile: ProfileConfig) -> dict:
         return {
