@@ -121,6 +121,9 @@ class ControllersTableWidget(QWidget):
     def _refresh(self):
         """Rebuild the table from connected slots."""
         self.table.setRowCount(0)
+        # Clear stale row-to-slot mapping
+        if hasattr(self, '_row_to_slot'):
+            self._row_to_slot.clear()
         slots = self.multi_manager.get_all_slots()
         row = 0
         for slot in slots:
@@ -269,9 +272,10 @@ class ControllersTableWidget(QWidget):
         self.table.setItem(row, 7, color_item)
         self.table.item(row, 7).setSizeHint(QSize(30, 20))
 
-        # Store reference for click handler
-        self._color_cell_row = row
-        self._color_cell_slot = slot
+        # Store mapping of row to slot for click handler
+        if not hasattr(self, '_row_to_slot'):
+            self._row_to_slot = {}
+        self._row_to_slot[row] = slot
 
         # Connect cellClicked signal once (use a flag to avoid duplicate connections)
         if not hasattr(self, '_color_cell_connected'):
@@ -282,9 +286,12 @@ class ControllersTableWidget(QWidget):
         """Open color dialog when LED color cell is clicked."""
         if col != 7:
             return
-        slot = self._color_cell_slot
+        
+        # Get the slot for this specific row
+        slot = self._row_to_slot.get(row) if hasattr(self, '_row_to_slot') else None
         if not slot:
             return
+        
         current_color = QColor(*slot.get_led_color())
         color = QColorDialog.getColor(current_color, self, "Selecione a cor do LED")
         if color.isValid():

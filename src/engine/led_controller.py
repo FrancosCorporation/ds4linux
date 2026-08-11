@@ -33,8 +33,8 @@ class LEDController:
 
         if led_path:
             self.set_led_path(led_path)
-        else:
-            self._auto_discover()
+        # Do not auto-discover here - let ControllerSlot.set_led_path()
+        # explicitly set the correct LED path for each device
 
     def _auto_discover(self):
         """Discover LED sysfs paths for any DS4 controller."""
