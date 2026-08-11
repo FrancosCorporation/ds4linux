@@ -79,7 +79,7 @@ class DeviceMonitor(QObject):
             self._check_and_emit(device.device_node, added=False)
 
     def _is_real_ds4(self, device_path: str) -> bool:
-        """Check if a device is a genuine DS4 (not virtual uinput)."""
+        """Check if a device is a genuine DS4 main controller (not sub-devices)."""
         try:
             dev = evdev.InputDevice(device_path)
             # Skip virtual uinput devices
@@ -97,7 +97,15 @@ class DeviceMonitor(QObject):
             has_ds4_btn = any(k in keys for k in (
                 0x130, 0x131, 0x133, 0x134,
             ))
-            return has_ds4_btn
+            if not has_ds4_btn:
+                return False
+            # CRITICAL: Only accept the MAIN controller device
+            # Reject motion sensors and touchpad sub-devices
+            name = dev.name.lower()
+            if "motion" in name or "touchpad" in name:
+                logger.debug(f"Skipping sub-device: {dev.name}")
+                return False
+            return True
         except (OSError, PermissionError):
             return False
 

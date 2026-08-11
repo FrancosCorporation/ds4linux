@@ -109,7 +109,8 @@ class WorkerThread(QThread):
 
                 if phys_fd in readable:
                     try:
-                        for event in device.read(timeout=0):
+                        # Read all available events (no timeout parameter)
+                        for event in device.read():
                             if not self._running:
                                 break
 
@@ -157,7 +158,7 @@ class WorkerThread(QThread):
 
                 if virt_fd in readable:
                     try:
-                        for event in vdev._uinput.read(timeout=0):
+                        for event in vdev._uinput.read():
                             if event.type == EV_FF:
                                 try:
                                     device.write(EV_FF, event.code, event.value)

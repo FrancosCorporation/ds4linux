@@ -589,6 +589,8 @@ class ProfileTabWidget(QWidget):
         self._setup_ui()
         self._connect_signals()
         self._load_current_profile()
+        # Connect to worker thread raw events for mapping
+        self._connect_raw_events()
 
     # ------------------------------------------------------------------
     def _setup_ui(self):
@@ -698,6 +700,16 @@ class ProfileTabWidget(QWidget):
         controls_layout.addWidget(self.right_tabs, 1)
 
         self.sub_tabs.addTab(controls_widget, "Controls")
+
+    def _connect_raw_events(self):
+        """Connect to worker thread raw_event signal for mapping mode."""
+        if hasattr(self.slot, '_worker') and self.slot._worker:
+            self.slot._worker.raw_event.connect(self._on_raw_event)
+            self.mapping_tab.set_raw_event_callback(self._on_raw_event)
+
+    def _on_raw_event(self, event_type: int, code: int, value: int):
+        """Route raw events to mapping tab."""
+        self.mapping_tab._on_raw_event(event_type, code, value)
 
     def _connect_signals(self):
         self.save_profile_btn.clicked.connect(self._save_profile)

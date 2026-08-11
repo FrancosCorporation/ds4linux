@@ -230,7 +230,7 @@ class LEDController:
     def _send_hid_report(self, report: bytes) -> bool:
         """Send HID output report to DS4. Returns True on success."""
         try:
-            hid_fd = device_manager.get_hid_device()
+            hid_fd = device_manager.DeviceManager.get_hid_device()
             if hid_fd is None:
                 return False
             os.write(hid_fd, report)
@@ -361,10 +361,10 @@ class LEDController:
         Find the LED sysfs base directory for a DS4 controller.
 
         Strategy (in order):
-          1. Resolve input event → input device name → look for inputNN:* LEDs.
-          2. Match LED device symlinks to the input device's HID parent.
-          3. Match by vendor ID in HID uevent.
-          4. Fallback: any LED tree with red+green+blue or rgb:indicator.
+          1. Resolve input device to its HID parent path.
+          2. Search /sys/class/leds/ for directories whose device symlink
+             points to the same HID device.
+          3. Fallback: look for any LED tree with red+green+blue or rgb:indicator.
         """
         from ..constants import SYS_LEDS_BASE
         from pathlib import Path as P
@@ -374,35 +374,33 @@ class LEDController:
             if not input_sysfs.exists():
                 return None
 
-            # Method 1: direct match by input device name
-            input_name = input_sysfs.name  # e.g. "input171"
-            red_dir = SYS_LEDS_BASE / f"{input_name}:red"
-            rgb_ind = SYS_LEDS_BASE / f"{input_name}:rgb:indicator"
-            if red_dir.exists() or rgb_ind.exists():
-                return SYS_LEDS_BASE / input_name
-
-            # Resolve input device to find HID parent
+            # Resolve to the actual input device path
             try:
                 resolved_input = input_sysfs.resolve()
             except (OSError, RuntimeError):
-                resolved_input = None
+                return None
 
-            # Method 2: match LED device symlinks to input device parent
-            if resolved_input:
-                for entry in SYS_LEDS_BASE.iterdir():
-                    if not entry.is_dir():
-                        continue
-                    dev_link = entry / "device"
-                    if not dev_link.exists():
-                        continue
-                    try:
-                        led_dev = dev_link.resolve()
-                        if str(led_dev.parent) == str(resolved_input.parent):
-                            return SYS_LEDS_BASE / entry.name
-                    except (OSError, RuntimeError):
-                        continue
+            # Method 1: Match LED device symlinks to input device's parent
+            # LED symlinks point to the HID device, not the input device
+            # We need to match by going up one level from input to HID
+            input_parent = resolved_input.parent  # e.g., .../input/input185
+            hid_device = input_parent  # The HID device is the parent of input
 
-            # Method 3: match by HID vendor ID from uevent
+            for entry in SYS_LEDS_BASE.iterdir():
+                if not entry.is_dir():
+                    continue
+                dev_link = entry / "device"
+                if not dev_link.exists():
+                    continue
+                try:
+                    led_device = dev_link.resolve()
+                    # Check if this LED's device matches our HID device
+                    if str(led_device) == str(hid_device):
+                        return SYS_LEDS_BASE / entry.name
+                except (OSError, RuntimeError):
+                    continue
+
+            # Method 2: Match by vendor ID in the HID device uevent
             hid_addr = None
             dev_link = input_sysfs / "device"
             if dev_link.exists():
@@ -413,6 +411,7 @@ class LEDController:
                         content = uevent_file.read_text()
                         for line in content.splitlines():
                             if line.startswith("HID_ID="):
+                                # HID_ID=0005:0000054C:000009CC
                                 parts = line.split("=")[1].split(":")
                                 if len(parts) >= 3:
                                     hid_addr = f"{parts[1].upper()}:{parts[2].upper()}"
@@ -433,7 +432,7 @@ class LEDController:
                         except (OSError, RuntimeError):
                             continue
 
-            # Method 4: fallback — find any LED tree with the DS4 vendor pattern
+            # Method 3: Fallback — find any LED tree with the DS4 vendor ID pattern
             for entry in SYS_LEDS_BASE.iterdir():
                 if not entry.is_dir():
                     continue

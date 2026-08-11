@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import Dict, Optional
 
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QTabWidget,
     QGroupBox, QFormLayout, QPushButton, QLabel, QMessageBox,
     QSystemTrayIcon, QMenu, QFrame, QScrollArea, QTextEdit,
-    QCheckBox, QLineEdit, QComboBox, QDialog, QDialogButtonBox
+    QCheckBox, QLineEdit, QComboBox, QDialog, QDialogButtonBox,
+    QListWidget, QListWidgetItem, QHeaderView, QAbstractItemView,
+    QSplitter
 )
 from PySide6.QtCore import Qt, Signal, Slot, QTimer, QSize
 from PySide6.QtGui import QIcon, QPixmap, QColor, QAction, QFont, QPainter
@@ -19,6 +22,144 @@ from .controllers_table import ControllersTableWidget
 from .controller_tab import ProfileTabWidget
 
 logger = logging.getLogger(__name__)
+
+
+class ProfileListWidget(QListWidget):
+    """
+    Profile list with double-click, context menu, and CRUD operations.
+    """
+    profile_selected = Signal(str)
+    profile_edit_requested = Signal(str)
+    profile_created = Signal(str)
+    profile_deleted = Signal(str)
+
+    def __init__(self, profile_manager, parent=None):
+        super().__init__(parent)
+        self._pm = profile_manager
+        self._set_mouse_tracking()
+        self._setup_ui()
+        self._load_profiles()
+
+    def _set_mouse_tracking(self):
+        self.setMouseTracking(True)
+        self.setAlternatingRowColors(True)
+        self.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.itemDoubleClicked.connect(self._on_double_click)
+        self.customContextMenuRequested.connect(self._on_context_menu)
+
+    def _setup_ui(self):
+        self.setStyleSheet("""
+            QListWidget {
+                background: #252536;
+                border: 1px solid #3a3a5c;
+                border-radius: 6px;
+                padding: 4px;
+            }
+            QListWidget::item {
+                padding: 8px 12px;
+                border-radius: 4px;
+                margin: 2px 0;
+            }
+            QListWidget::item:selected {
+                background: #00d4aa;
+                color: #1e1e2e;
+            }
+            QListWidget::item:hover:!selected {
+                background: #3a3a5c;
+            }
+        """)
+
+    def _load_profiles(self):
+        self.clear()
+        profiles = self._pm.list_profiles()
+        for name in profiles:
+            item = QListWidgetItem(name)
+            item.setData(Qt.UserRole, name)
+            self.addItem(item)
+        # Select current profile
+        current = self._pm.get_current_profile_name()
+        if current:
+            for i in range(self.count()):
+                if self.item(i).data(Qt.UserRole) == current:
+                    self.setCurrentItem(self.item(i))
+                    self.profile_selected.emit(current)
+                    break
+
+    def _on_double_click(self, item: QListWidgetItem):
+        name = item.data(Qt.UserRole)
+        if name:
+            self.profile_edit_requested.emit(name)
+
+    def _on_context_menu(self, pos):
+        item = self.itemAt(pos)
+        menu = QMenu(self)
+
+        edit_action = QAction("✏️ Editar", menu)
+        edit_action.triggered.connect(lambda: self.profile_edit_requested.emit(
+            item.data(Qt.UserRole) if item else None
+        ))
+        menu.addAction(edit_action)
+
+        if item:
+            duplicate_action = QAction("📋 Duplicar", menu)
+            duplicate_action.triggered.connect(lambda: self._duplicate_profile(item.data(Qt.UserRole)))
+            menu.addAction(duplicate_action)
+
+            delete_action = QAction("🗑️ Excluir", menu)
+            delete_action.triggered.connect(lambda: self._delete_profile(item.data(Qt.UserRole)))
+            menu.addAction(delete_action)
+
+        menu.addSeparator()
+        new_action = QAction("➕ Novo Perfil", menu)
+        new_action.triggered.connect(self._create_new_profile)
+        menu.addAction(new_action)
+
+        menu.exec(self.mapToGlobal(pos))
+
+    def _duplicate_profile(self, name: str):
+        from PySide6.QtWidgets import QInputDialog
+        new_name, ok = QInputDialog.getText(self, "Duplicar Perfil", "Nome do novo perfil:")
+        if ok and new_name.strip():
+            new_name = new_name.strip()
+            if new_name in self._pm.list_profiles():
+                QMessageBox.warning(self, "Erro", f"Perfil '{new_name}' já existe.")
+                return
+            # Load and save with new name
+            profile = self._pm.load_profile(name)
+            self._pm.save_profile(new_name, profile)
+            self._load_profiles()
+            self.profile_created.emit(new_name)
+
+    def _delete_profile(self, name: str):
+        if name.lower() == "default":
+            QMessageBox.warning(self, "Erro", "Não é possível excluir o perfil padrão.")
+            return
+        reply = QMessageBox.question(
+            self, "Confirmar Exclusão",
+            f"Tem certeza que deseja excluir o perfil '{name}'?",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            self._pm.delete_profile(name)
+            self._load_profiles()
+            self.profile_deleted.emit(name)
+
+    def _create_new_profile(self):
+        from PySide6.QtWidgets import QInputDialog
+        name, ok = QInputDialog.getText(self, "Novo Perfil", "Nome do perfil:")
+        if ok and name.strip():
+            name = name.strip()
+            if name in self._pm.list_profiles():
+                QMessageBox.warning(self, "Erro", f"Perfil '{name}' já existe.")
+                return
+            self._pm.create_profile(name)
+            self._load_profiles()
+            self.profile_created.emit(name)
+
+    def refresh(self):
+        self._load_profiles()
 
 
 class MainWindow(QMainWindow):
