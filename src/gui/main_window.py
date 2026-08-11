@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QTabWidget,
     QGroupBox, QFormLayout, QPushButton, QLabel, QMessageBox,
     QSystemTrayIcon, QMenu, QFrame, QScrollArea, QTextEdit,
-    QCheckBox, QLineEdit, QComboBox
+    QCheckBox, QLineEdit, QComboBox, QDialog, QDialogButtonBox
 )
 from PySide6.QtCore import Qt, Signal, Slot, QTimer, QSize
 from PySide6.QtGui import QIcon, QPixmap, QColor, QAction, QFont, QPainter
@@ -16,24 +17,23 @@ from ..engine.multi_device_manager import MultiDeviceManager
 from .styles import get_stylesheet
 from .controllers_table import ControllersTableWidget
 from .controller_tab import ProfileTabWidget
-from ..constants import Path as _Path
 
 logger = logging.getLogger(__name__)
-
-_ICON_PATH = str(_Path(__file__).parent / "icons" / "ds4linux.png")
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(f"{APP_NAME} v{APP_VERSION}")
-        self.setWindowIcon(QIcon(_ICON_PATH))
+        self.setWindowIcon(self._create_app_icon())
         self.setMinimumSize(1100, 750)
         self.resize(1200, 800)
         self.setStyleSheet(get_stylesheet())
 
         self._multi_manager = MultiDeviceManager(max_slots=MAX_CONTROLLERS)
         self._profile_tabs = []
+        self._profiles_tab: QTabWidget = None
+        self._profiles_tabs: Dict[int, "ProfileTabWidget"] = {}
 
         self._tray_icon: QSystemTrayIcon = None
         self._tray_menu: QMenu = None
@@ -42,13 +42,31 @@ class MainWindow(QMainWindow):
         self._setup_ui()
         self._connect_signals()
 
+    def _create_app_icon(self) -> QIcon:
+        """Create the application window icon."""
+        icon_path = Path(__file__).parent / "icons" / "ds4linux.png"
+        if icon_path.exists():
+            return QIcon(str(icon_path))
+        # Fallback: draw a simple icon
+        pixmap = QPixmap(64, 64)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setBrush(QColor(0, 212, 170))
+        painter.setPen(Qt.NoPen)
+        painter.drawRoundedRect(8, 8, 48, 48, 12, 12)
+        painter.setBrush(QColor(30, 30, 46))
+        painter.drawRoundedRect(16, 20, 32, 24, 6, 6)
+        painter.end()
+        return QIcon(pixmap)
+
     def _setup_tray(self):
         if not QSystemTrayIcon.isSystemTrayAvailable():
             logger.warning("System tray not available")
             return
 
         self._tray_icon = QSystemTrayIcon(self)
-        icon = self._create_tray_icon()
+        icon = self._create_app_icon()
         self._tray_icon.setIcon(icon)
         self._tray_icon.setToolTip(f"{APP_NAME} - DS4 Emulator")
 
@@ -56,7 +74,7 @@ class MainWindow(QMainWindow):
         show_action = QAction("Show Window", self)
         show_action.triggered.connect(self.show_normal)
         quit_action = QAction("Quit", self)
-        quit_action.triggered.connect(self.quit_application)
+        quit_action.triggered.connect(self._quit_application)
         self._tray_menu.addAction(show_action)
         self._tray_menu.addSeparator()
         self._tray_menu.addAction(quit_action)
@@ -64,19 +82,6 @@ class MainWindow(QMainWindow):
         self._tray_icon.setContextMenu(self._tray_menu)
         self._tray_icon.activated.connect(self._on_tray_activated)
         self._tray_icon.show()
-
-    def _create_tray_icon(self) -> QIcon:
-        pixmap = QPixmap(32, 32)
-        pixmap.fill(Qt.transparent)
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.Antialiasing)
-        painter.setBrush(QColor(0, 212, 170))
-        painter.setPen(Qt.NoPen)
-        painter.drawRoundedRect(4, 4, 24, 24, 6, 6)
-        painter.setBrush(QColor(30, 30, 46))
-        painter.drawRoundedRect(8, 8, 16, 16, 4, 4)
-        painter.end()
-        return QIcon(pixmap)
 
     def _on_tray_activated(self, reason):
         if reason == QSystemTrayIcon.DoubleClick:
@@ -87,7 +92,7 @@ class MainWindow(QMainWindow):
         self.raise_()
         self.activateWindow()
 
-    def quit_application(self):
+    def _quit_application(self):
         self._multi_manager.cleanup()
         if self._tray_icon:
             self._tray_icon.hide()
@@ -95,6 +100,8 @@ class MainWindow(QMainWindow):
         QApplication.quit()
 
     def closeEvent(self, event):
+        """Properly clean up all devices before closing."""
+        self._multi_manager.cleanup()
         if self._tray_icon and self._tray_icon.isVisible():
             event.ignore()
             self.hide()
@@ -105,7 +112,6 @@ class MainWindow(QMainWindow):
                 2000
             )
         else:
-            self.quit_application()
             event.accept()
 
     def _setup_ui(self):
@@ -115,24 +121,24 @@ class MainWindow(QMainWindow):
         main_layout.setSpacing(0)
         main_layout.setContentsMargins(0, 0, 0, 0)
 
-        # Main tabs (DS4Windows style: Controllers, Profiles, Auto Profiles, Settings, Log)
         self._main_tabs = QTabWidget()
         self._main_tabs.setDocumentMode(True)
         main_layout.addWidget(self._main_tabs, 1)
 
-        # Controllers tab
+        # Controllers tab (dynamic table - starts empty)
         self._controllers_table = ControllersTableWidget(self._multi_manager)
+        self._controllers_table.controller_edit.connect(self._on_controller_edit)
         self._main_tabs.addTab(self._controllers_table, "Controllers")
 
-        # Profiles tab (placeholder)
-        profiles_widget = QWidget()
-        profiles_layout = QVBoxLayout(profiles_widget)
-        profiles_label = QLabel("Profiles Management - Click 'Editar' on a controller to edit its profile")
-        profiles_label.setAlignment(Qt.AlignCenter)
-        profiles_label.setStyleSheet("color: #a0a0b0; font-size: 14px; margin-top: 40px;")
-        profiles_layout.addWidget(profiles_label)
-        profiles_layout.addStretch()
-        self._main_tabs.addTab(profiles_widget, "Profiles")
+        # Profiles tab - the single, reusable profile editor tab
+        self._profiles_tab = QTabWidget()
+        # We will add/remove content dynamically
+        placeholder = QFrame()
+        pl_layout = QVBoxLayout(placeholder)
+        pl_layout.addWidget(QLabel("Select a controller and click 'Editar' to configure it."))
+        pl_layout.addStretch()
+        self._profiles_tab.addTab(placeholder, "Perfis")
+        self._main_tabs.addTab(self._profiles_tab, "Perfis")
 
         # Auto Profiles tab (placeholder)
         auto_widget = QWidget()
@@ -253,7 +259,6 @@ class MainWindow(QMainWindow):
         self._main_tabs.addTab(scroll, "Log")
 
     def _connect_signals(self):
-        self._controllers_table.controller_edit.connect(self._on_controller_edit)
         self._stop_all_btn.clicked.connect(self._stop_all_controllers)
 
         for slot in self._multi_manager.get_all_slots():
@@ -261,39 +266,59 @@ class MainWindow(QMainWindow):
             slot.status_changed.connect(self._on_slot_status_changed)
             slot.battery_update.connect(lambda pct: self._on_battery_update(pct))
 
-    def _on_controller_edit(self, slot_id: int):
-        # Remove existing profile tab for this slot
-        for i in range(self._main_tabs.count() - 1, 1, -1):
-            tab_text = self._main_tabs.tabText(i)
-            if tab_text.startswith(f"Controller {slot_id + 1}"):
-                widget = self._main_tabs.widget(i)
-                self._main_tabs.removeTab(i)
-                widget.deleteLater()
+        # Connect device connect/disconnect signals to update the table
+        self._multi_manager.device_connected_signal.connect(self._on_device_connected)
+        self._multi_manager.device_disconnected_signal.connect(self._on_device_disconnected)
 
+        # Profile changes
+        self._multi_manager._profile_manager.profiles_changed.connect(self._on_profiles_changed)
+
+    def _on_controller_edit(self, slot_id: int):
+        """Open the single Profiles tab with the selected controller's profile."""
         slot = self._multi_manager.get_slot(slot_id)
         if not slot:
             return
 
+        # Remove existing profile editor if any
+        self._profiles_tab.removeTab(0)
+
+        # Create a new ProfileTabWidget for this controller
         profile_tab = ProfileTabWidget(slot_id, slot, self._multi_manager._profile_manager)
-        tab_idx = self._main_tabs.insertTab(2, profile_tab, f"Controller {slot_id + 1}")
-        self._main_tabs.setCurrentIndex(tab_idx)
-        self._profile_tabs.append(profile_tab)
+        profile_tab.save_requested.connect(self._on_profile_saved)
+        self._profiles_tab.addTab(profile_tab, f"Controller {slot_id + 1}")
+
+        # Switch to Profiles tab
+        self._main_tabs.setCurrentWidget(self._profiles_tab)
         self._status_label.setText(f"Editing Controller {slot_id + 1} profile")
 
-    def _stop_all_controllers(self):
-        self._multi_manager.disconnect_all()
-        self._controllers_table.refresh()
-        self._on_log_message("All controllers stopped")
-
-    @Slot(str)
-    def _on_log_message(self, msg: str):
-        self._log_text.append(msg)
-        self._log_text.verticalScrollBar().setValue(
-            self._log_text.verticalScrollBar().maximum()
-        )
+    def _on_profile_saved(self):
+        """Refresh the controllers table after profile save."""
         self._controllers_table.refresh()
 
-    @Slot(str)
+    def _on_device_connected(self, slot_id: int, device_path: str):
+        self._controllers_table._refresh()
+        connected = len(self._multi_manager.get_connected_slots())
+        if connected == 0:
+            self._status_label.setText("Ready - Connect your DS4 controllers")
+        elif connected == 1:
+            self._status_label.setText("1 controller connected")
+        else:
+            self._status_label.setText(f"{connected} controllers connected")
+
+    def _on_device_disconnected(self, slot_id: int):
+        self._controllers_table._refresh()
+        connected = len(self._multi_manager.get_connected_slots())
+        if connected == 0:
+            self._status_label.setText("Ready - Connect your DS4 controllers")
+        elif connected == 1:
+            self._status_label.setText("1 controller connected")
+        else:
+            self._status_label.setText(f"{connected} controllers connected")
+
+    def _on_profiles_changed(self):
+        """Refresh profile combos when profiles are created/deleted."""
+        self._controllers_table._refresh_profile_combos()
+
     def _on_slot_status_changed(self, status: str):
         self._controllers_table.refresh()
         connected = len(self._multi_manager.get_connected_slots())
@@ -304,9 +329,20 @@ class MainWindow(QMainWindow):
         else:
             self._status_label.setText(f"{connected} controllers connected")
 
-    @Slot(int)
     def _on_battery_update(self, pct: int):
         self._controllers_table.refresh()
+
+    @Slot(str)
+    def _on_log_message(self, msg: str):
+        self._log_text.append(msg)
+        self._log_text.verticalScrollBar().setValue(
+            self._log_text.verticalScrollBar().maximum()
+        )
+
+    def _stop_all_controllers(self):
+        self._multi_manager.disconnect_all()
+        self._controllers_table.refresh()
+        self._on_log_message("All controllers stopped")
 
     @Slot()
     def _install_udev_rules(self):
@@ -329,5 +365,6 @@ class MainWindow(QMainWindow):
             self._udev_status.setText(f"✗ Error: {e}")
             self._udev_status.setStyleSheet("color: #ff6b6b;")
 
-from PySide6.QtWidgets import QApplication
-from PySide6.QtGui import QPainter
+
+# Fix import that was at bottom of file
+from typing import Dict

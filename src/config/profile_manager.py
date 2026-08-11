@@ -3,14 +3,21 @@ from pathlib import Path
 from typing import Dict, List, Optional
 import logging
 
+from PySide6.QtCore import QObject, Signal
+
 from ..constants import PROFILE_DIR, CONFIG_FILE, VirtualDeviceType
 from ..engine.input_mapper import ProfileConfig, AxisConfig, TriggerConfig
 
 logger = logging.getLogger(__name__)
 
 
-class ProfileManager:
+class ProfileManager(QObject):
+    """Manages profile loading, saving, and listing."""
+
+    profiles_changed = Signal()
+
     def __init__(self):
+        super().__init__()
         PROFILE_DIR.mkdir(parents=True, exist_ok=True)
         CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
         self._current_profile_name: Optional[str] = None
@@ -72,10 +79,17 @@ class ProfileManager:
             self._current_profile_name = name
             self._save_last_used()
             logger.info(f"Saved profile: {name}")
+            self.profiles_changed.emit()
             return True
         except Exception as e:
             logger.error(f"Failed to save profile {name}: {e}")
             return False
+
+    def create_profile(self, name: str) -> ProfileConfig:
+        """Create a new profile with default settings and return it."""
+        profile = self._create_default_profile(name)
+        self.save_profile(name, profile)
+        return profile
 
     def delete_profile(self, name: str) -> bool:
         if name.lower() == "default":
@@ -88,6 +102,7 @@ class ProfileManager:
                     self._current_profile_name = None
                     self._save_last_used()
                 logger.info(f"Deleted profile: {name}")
+                self.profiles_changed.emit()
                 return True
         except Exception as e:
             logger.error(f"Failed to delete profile {name}: {e}")
@@ -96,14 +111,22 @@ class ProfileManager:
     def get_current_profile_name(self) -> Optional[str]:
         return self._current_profile_name
 
-    def _create_default_profile(self) -> ProfileConfig:
+    def _create_default_profile(self, name: str = "Default") -> ProfileConfig:
         from ..constants import DS4_TO_XBOX_BTN_MAP
         profile = ProfileConfig(
-            name="Default",
+            name=name,
             device_type=VirtualDeviceType.XBOX,
             button_maps=DS4_TO_XBOX_BTN_MAP.copy(),
         )
-        self.save_profile("Default", profile)
+        # Save if not already a file
+        path = self.get_profile_path(name)
+        if not path.exists():
+            try:
+                data = self._profile_to_dict(profile)
+                with open(path, "w") as f:
+                    json.dump(data, f, indent=2)
+            except Exception as e:
+                logger.error(f"Failed to create default profile {name}: {e}")
         return profile
 
     def _profile_to_dict(self, profile: ProfileConfig) -> dict:

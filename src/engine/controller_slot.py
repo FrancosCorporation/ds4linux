@@ -42,7 +42,6 @@ class ControllerSlot(QObject):
         self._profile: Optional[ProfileConfig] = None
         self._profile_manager = profile_manager
 
-        # Create a default profile
         from ..config.profile_manager import ProfileManager
         pm = profile_manager or ProfileManager()
         default_name = pm.get_current_profile_name() or "Default"
@@ -78,9 +77,8 @@ class ControllerSlot(QObject):
         self._profile = value
         self._input_mapper.set_profile(value)
         self._virtual_device.set_device_type(value.device_type)
-        if self._led_controller.is_available():
-            self._led_controller.set_color(*value.led_color)
-            self._led_controller.set_brightness(value.led_brightness)
+        self._led_controller.set_color(*value.led_color)
+        self._led_controller.set_brightness(value.led_brightness)
 
     @property
     def device(self) -> Optional[InputDevice]:
@@ -98,12 +96,13 @@ class ControllerSlot(QObject):
     def battery_level(self) -> int:
         return self._battery_level
 
+    @property
+    def led_controller(self) -> LEDController:
+        return self._led_controller
+
     def set_profile(self, profile: ProfileConfig):
         self.profile = profile
 
-    # ------------------------------------------------------------------
-    # Dynamic attach / detach
-    # ------------------------------------------------------------------
     def attach_device(self, device_path: str) -> bool:
         if self.is_connected:
             return True
@@ -117,14 +116,13 @@ class ControllerSlot(QObject):
             return False
 
         try:
-            self._device.grab()  # exclusive access
+            self._device.grab()
             self._grabbed = True
         except OSError as e:
             logger.warning(f"grab() failed for {device_path}: {e}")
             self.status = SlotStatus.ERROR
             return False
 
-        # Create virtual device with the profile's device type
         if not self._virtual_device.is_active():
             self._virtual_device.create()
 
@@ -132,13 +130,15 @@ class ControllerSlot(QObject):
         self.status = SlotStatus.CONNECTED
         self._battery_level = self._read_battery()
 
-        # Set LED path
-        led_path = DeviceManager.get_led_path(self._device)
+        # Discover LED path from sysfs
+        led_path = LEDController.find_ds4_led(device_path)
         if led_path:
             self._led_controller.set_led_path(led_path)
-            if self._profile:
-                self._led_controller.set_color(*self._profile.led_color)
-                self._led_controller.set_brightness(self._profile.led_brightness)
+            logger.info(f"Found LED path: {led_path}")
+
+        # Apply LED settings from profile
+        self._led_controller.set_color(*self._profile.led_color)
+        self._led_controller.set_brightness(self._profile.led_brightness)
 
         self.device_connected.emit(self._device)
         self.log_message.emit(f"Slot {self._slot_id}: DS4 connected at {device_path}")
@@ -148,6 +148,10 @@ class ControllerSlot(QObject):
         if self._device:
             try:
                 self._device.ungrab()
+            except OSError:
+                pass
+            try:
+                self._device.close()
             except OSError:
                 pass
             self._grabbed = False
@@ -161,9 +165,6 @@ class ControllerSlot(QObject):
             self.device_disconnected.emit()
             self.log_message.emit(f"Slot {self._slot_id}: DS4 disconnected")
 
-    # ------------------------------------------------------------------
-    # Worker thread
-    # ------------------------------------------------------------------
     def _setup_worker(self):
         self._worker.set_input_mapper(self._input_mapper)
         self._worker.set_virtual_device(self._virtual_device)
@@ -189,9 +190,6 @@ class ControllerSlot(QObject):
             self._worker.stop()
             self._worker.wait(2000)
 
-    # ------------------------------------------------------------------
-    # Battery helper
-    # ------------------------------------------------------------------
     def _read_battery(self) -> int:
         if not self._device:
             return 0
@@ -214,6 +212,12 @@ class ControllerSlot(QObject):
         if self._profile:
             return self._profile.led_color
         return (0, 0, 255)
+
+    def set_led_color(self, r: int, g: int, b: int):
+        """Set LED color both in hardware (if available) and profile."""
+        self._led_controller.set_color(r, g, b)
+        if self._profile:
+            self._profile.led_color = (r, g, b)
 
     def cleanup(self):
         self.stop_worker()

@@ -14,14 +14,14 @@ logger = logging.getLogger(__name__)
 
 class DeviceMonitor(QObject):
     """
-    Monitors udev/hidraw for DS4 hot-plug events.
+    Monitors udev/input for DS4 hot-plug events.
     Runs in a background QThread with a QTimer that polls pyudev Monitor.
     Emits device_added / device_removed signals when a DS4 is connected/disconnected.
     """
 
     device_added = Signal(str)        # input event path (e.g. /dev/input/event27)
     device_removed = Signal(str)
-    scan_finished = Signal(list)      # list of initial paths
+    scan_finished = Signal(list)     # list of initial paths
 
     def __init__(self, parent: QObject | None = None):
         super().__init__(parent)
@@ -88,15 +88,14 @@ class DeviceMonitor(QObject):
             # Must be a DS4 vendor and recognized PID
             if dev.info.vendor != DS4_VID or dev.info.product not in DS4_PIDS:
                 return False
-            # Must have button capabilities (a real controller, not a sound device)
+            # Must have button capabilities (EV_KEY = 0x01)
             caps = dev.capabilities()
-            # EV_KEY = 0x01, check for button events
             if 0x01 not in caps:
                 return False
-            # Verify it has typical DS4 buttons
-            keys = caps[0x01]  # EV_KEY
+            # Verify it has typical DS4 buttons (cross = 0x130, etc.)
+            keys = caps[0x01]
             has_ds4_btn = any(k in keys for k in (
-                0x130, 0x131, 0x133, 0x134,  # cross/circle/square/triangle
+                0x130, 0x131, 0x133, 0x134,
             ))
             return has_ds4_btn
         except (OSError, PermissionError):

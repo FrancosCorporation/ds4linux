@@ -5,6 +5,7 @@ from pathlib import Path
 import logging
 
 from evdev import InputDevice
+from PySide6.QtCore import QObject, Signal
 
 from .controller_slot import ControllerSlot, SlotStatus
 from .device_monitor import DeviceMonitor
@@ -14,29 +15,38 @@ from ..config.profile_manager import ProfileManager
 logger = logging.getLogger(__name__)
 
 
-class MultiDeviceManager:
+class MultiDeviceManager(QObject):
+    """
+    Manages multiple ControllerSlots, dynamically assigning devices
+    detected by DeviceMonitor.
+    
+    Emits signals so the GUI can update dynamically without fixed slot assumptions.
+    """
+
+    device_connected_signal = Signal(int, str)   # slot_id, device_path
+    device_disconnected_signal = Signal(int)     # slot_id
+    profiles_changed = Signal()                  # Emitted when a new profile is created
+
     def __init__(self, max_slots: int = MAX_CONTROLLERS):
+        super().__init__()
         self.max_slots = max_slots
         self._slots: Dict[int, ControllerSlot] = {}
         self._profile_manager = ProfileManager()
         self._device_paths_in_use: set = set()
 
-        # Create slots
         for i in range(max_slots):
             slot = ControllerSlot(i, profile_manager=self._profile_manager)
             slot.log_message.connect(self._on_slot_log)
+            slot.device_connected.connect(self._on_slot_device_connected)
+            slot.device_disconnected.connect(self._on_slot_device_disconnected)
             self._slots[i] = slot
 
-        # Create device monitor in background thread
         self._monitor = DeviceMonitor()
         self._monitor.device_added.connect(self._on_device_added)
         self._monitor.device_removed.connect(self._on_device_removed)
         self._monitor.scan_finished.connect(self._on_scan_finished)
         self._monitor.start()
 
-    # ------------------------------------------------------------------
-    # Signal handlers for DeviceMonitor
-    # ------------------------------------------------------------------
     def _on_scan_finished(self, paths: list):
         for path in paths:
             if path not in self._device_paths_in_use:
@@ -52,7 +62,24 @@ class MultiDeviceManager:
                 self._device_paths_in_use.discard(path)
                 slot.stop_worker()
                 slot.detach_device()
+                self.device_disconnected_signal.emit(sid)
                 logger.info(f"Removed controller at {path} from slot {sid}")
+
+    def _on_slot_device_connected(self, device):
+        """Forward slot device_connected signal for GUI updates."""
+        # Find which slot this is
+        for sid, slot in self._slots.items():
+            if slot.device is device:
+                self.device_connected_signal.emit(sid, slot.device_path or "")
+
+    def _on_slot_device_disconnected(self):
+        """Forward slot device_disconnected signal for GUI updates."""
+        for sid, slot in self._slots.items():
+            if not slot.is_connected and slot.device_path is None:
+                pass  # Already handled by _on_device_removed
+
+    def _on_slot_log(self, msg: str):
+        logger.info(msg)
 
     def _try_assign_device(self, path: str) -> bool:
         slot = self._get_available_slot()
@@ -68,6 +95,7 @@ class MultiDeviceManager:
         if slot.attach_device(path):
             self._device_paths_in_use.add(path)
             slot.start_worker()
+            self.device_connected_signal.emit(slot.slot_id, path)
             logger.info(f"Assigned {path} to slot {slot.slot_id}")
             return True
         return False
@@ -111,7 +139,6 @@ class MultiDeviceManager:
             if slot.device_path:
                 self._device_paths_in_use.discard(slot.device_path)
 
-        # Handle if device is already in use by another slot
         if device_path in self._device_paths_in_use:
             other_slot = self.get_slot_by_device_path(device_path)
             if other_slot and other_slot != slot:
@@ -125,6 +152,7 @@ class MultiDeviceManager:
         if slot.attach_device(device_path):
             self._device_paths_in_use.add(device_path)
             slot.start_worker()
+            self.device_connected_signal.emit(slot.slot_id, device_path)
             return True
         return False
 
@@ -135,18 +163,25 @@ class MultiDeviceManager:
             if slot.device_path:
                 self._device_paths_in_use.discard(slot.device_path)
             slot.detach_device()
+            self.device_disconnected_signal.emit(slot_id)
 
     def disconnect_all(self):
-        for slot in self._slots.values():
+        for slot in list(self._slots.values()):
             if slot.is_connected:
                 slot.stop_worker()
                 if slot.device_path:
                     self._device_paths_in_use.discard(slot.device_path)
                 slot.detach_device()
+                self.device_disconnected_signal.emit(slot.slot_id)
 
     def cleanup(self):
+        """Properly clean up all resources - called on app close."""
         self._monitor.stop()
         self.disconnect_all()
+        # Give threads time to finish
+        for slot in self._slots.values():
+            slot.cleanup()
 
-    def _on_slot_log(self, msg: str):
-        logger.info(msg)
+    def reload_profiles(self):
+        """Reload available profiles and emit signal for GUI update."""
+        self.profiles_changed.emit()

@@ -564,6 +564,8 @@ class ProfileTabWidget(QWidget):
     AxisConfig | Lightbar | Gyro | Other (right).
     """
 
+    save_requested = Signal()
+
     def __init__(self, slot_id: int, slot, profile_manager, parent=None):
         super().__init__(parent)
         self.slot_id = slot_id
@@ -762,6 +764,7 @@ class ProfileTabWidget(QWidget):
         self.profile_manager.save_profile(name, self._current_profile)
         self._load_current_profile()
         self.slot.set_profile(self._current_profile)
+        self.save_requested.emit()
 
     def _cancel_profile(self):
         self._load_current_profile()
