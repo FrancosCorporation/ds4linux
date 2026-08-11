@@ -270,7 +270,10 @@ class ControllersTableWidget(QWidget):
         color_item.setForeground(QColor(*color))
         color_item.setText(" ")
         self.table.setItem(row, 7, color_item)
-        self.table.item(row, 7).setSizeHint(QSize(30, 20))
+        # Only set size hint if item exists
+        item = self.table.item(row, 7)
+        if item:
+            item.setSizeHint(QSize(30, 20))
 
         # Store mapping of row to slot for click handler
         if not hasattr(self, '_row_to_slot'):
