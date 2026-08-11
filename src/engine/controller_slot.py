@@ -77,8 +77,9 @@ class ControllerSlot(QObject):
         self._profile = value
         self._input_mapper.set_profile(value)
         self._virtual_device.set_device_type(value.device_type)
-        self._led_controller.set_color(*value.led_color)
-        self._led_controller.set_brightness(value.led_brightness)
+        if self._led_controller.is_available():
+            self._led_controller.set_color(*value.led_color)
+            self._led_controller.set_brightness(value.led_brightness)
 
     @property
     def device(self) -> Optional[InputDevice]:
