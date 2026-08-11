@@ -44,6 +44,11 @@ class MainWindow(QMainWindow):
 
     def _create_app_icon(self) -> QIcon:
         """Create the application window icon."""
+        # Try SVG first
+        svg_path = Path(__file__).parent / "icons" / "icon.svg"
+        if svg_path.exists():
+            return QIcon(str(svg_path))
+        # Fallback to PNG
         icon_path = Path(__file__).parent / "icons" / "ds4linux.png"
         if icon_path.exists():
             return QIcon(str(icon_path))

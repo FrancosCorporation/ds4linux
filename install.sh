@@ -153,8 +153,28 @@ create_icon() {
     log_info "Installing application icon..."
     mkdir -p "$ICON_DIR"
     
-    # Copy the pre-made icon if available
-    if [ -f "$SCRIPT_DIR/src/icons/ds4linux.png" ]; then
+    # Check if SVG icon exists and convert to PNG
+    if [ -f "$SCRIPT_DIR/src/icons/icon.svg" ]; then
+        log_info "Converting SVG icon to PNG..."
+        python3 << PYEOF
+from PySide6.QtSvg import QSvgRenderer
+from PySide6.QtGui import QPixmap, QPainter
+from PySide6.QtCore import QSize, QRect
+
+renderer = QSvgRenderer("$SCRIPT_DIR/src/icons/icon.svg")
+if renderer.isValid():
+    pixmap = QPixmap(256, 256)
+    pixmap.fill(0)  # Transparent
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing)
+    renderer.render(painter, QRect(0, 0, 256, 256))
+    painter.end()
+    pixmap.save("/usr/share/icons/hicolor/256x256/apps/ds4linux.png")
+else:
+    print("Warning: SVG renderer failed, using fallback PNG")
+PYEOF
+    elif [ -f "$SCRIPT_DIR/src/icons/ds4linux.png" ]; then
+        # Fallback to pre-made PNG
         cp "$SCRIPT_DIR/src/icons/ds4linux.png" "$ICON_DIR/"
     else
         # Generate a fallback icon

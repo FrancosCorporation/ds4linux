@@ -1,0 +1,42 @@
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <!-- Fundo em Gradiente Escuro Moderno -->
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#21212B"/>
+      <stop offset="100%" stop-color="#121218"/>
+    </linearGradient>
+    
+    <!-- Efeito de Brilho Neon para o LED -->
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="18" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over"/>
+    </filter>
+  </defs>
+
+  <!-- Base do Ícone (Arredondado moderno) -->
+  <rect width="512" height="512" rx="115" fill="url(#bg)"/>
+
+  <!-- Lightbar (O grande destaque do app) -->
+  <rect x="156" y="125" width="200" height="20" rx="10" fill="#00F0FF" filter="url(#glow)"/>
+  <rect x="156" y="125" width="200" height="20" rx="10" fill="#FFFFFF" opacity="0.6"/>
+
+  <!-- Silhueta do Controle -->
+  <path d="M 100 230 C 40 230 40 370 80 410 C 110 440 160 400 180 350 C 190 325 322 325 332 350 C 352 400 402 440 432 410 C 472 370 472 230 412 230 Z" fill="#313140" stroke="#454555" stroke-width="8"/>
+  
+  <!-- Touchpad central -->
+  <rect x="186" y="215" width="140" height="100" rx="12" fill="#1C1C24"/>
+
+  <!-- D-Pad Minimalista -->
+  <rect x="110" y="255" width="45" height="14" rx="4" fill="#757585"/>
+  <rect x="125" y="240" width="14" height="45" rx="4" fill="#757585"/>
+
+  <!-- Botões de Ação (Cores originais com tom pastel) -->
+  <circle cx="395" cy="245" r="10" fill="#FF6B9E"/> <!-- Triângulo -->
+  <circle cx="415" cy="265" r="10" fill="#FF4747"/> <!-- Círculo -->
+  <circle cx="395" cy="285" r="10" fill="#479CFF"/> <!-- Cruz -->
+  <circle cx="375" cy="265" r="10" fill="#C16BFF"/> <!-- Quadrado -->
+
+  <!-- Analógicos -->
+  <circle cx="210" cy="345" r="28" fill="#22222D" stroke="#121218" stroke-width="5"/>
+  <circle cx="302" cy="345" r="28" fill="#22222D" stroke="#121218" stroke-width="5"/>
+</svg>
