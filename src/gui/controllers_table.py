@@ -92,11 +92,24 @@ class ControllersTableWidget(QWidget):
                     continue
                 status_item = self.table.item(r, 2)
                 if slot.is_connected:
-                    status_item.setText("● Bluetooth")
-                    status_item.setForeground(QColor("#6bff6b"))
+                    dev = slot.device
+                    phys = dev.phys or "" if dev else ""
+                    if "uinput" in phys.lower():
+                        status_item.setText("● Virtual")
+                        status_item.setForeground(QColor("#5dabff"))
+                    elif dev and dev.uniq:
+                        status_item.setText("● Bluetooth")
+                        status_item.setForeground(QColor("#6bff6b"))
+                    elif dev:
+                        status_item.setText("● USB")
+                        status_item.setForeground(QColor("#6bff6b"))
+                    else:
+                        status_item.setText("● Connected")
+                        status_item.setForeground(QColor("#6bff6b"))
                     ex_item = self.table.item(r, 3)
                     if ex_item:
                         ex_item.setText("🔑")
+                        ex_item.setToolTip("Device Grabber Active")
                     bat_item = self.table.item(r, 4)
                     if bat_item:
                         bat_item.setText(f"{slot.battery_level}%")
@@ -120,17 +133,30 @@ class ControllersTableWidget(QWidget):
         self.table.setItem(row, 0, idx_item)
 
         if slot.is_connected and slot.device:
-            dev_id = slot.device.name
-            if slot.device_path:
-                dev_id += f" ({slot.device_path})"
+            dev = slot.device
+            # Show device name + Bluetooth address if available
+            dev_id = dev.name
+            if dev.uniq:
+                dev_id = f"{dev.name} ({dev.uniq})"
         else:
             dev_id = "No controller"
         self.table.setItem(row, 1, QTableWidgetItem(dev_id))
 
         status_item = QTableWidgetItem()
         if slot.is_connected:
-            status_item.setText("● Bluetooth")
-            status_item.setForeground(QColor("#6bff6b"))
+            dev = slot.device
+            if dev and "uinput" in (dev.phys or "").lower():
+                status_item.setText("● Virtual")
+                status_item.setForeground(QColor("#5dabff"))
+            elif dev and dev.uniq:
+                status_item.setText("● Bluetooth")
+                status_item.setForeground(QColor("#6bff6b"))
+            elif dev:
+                status_item.setText("● USB")
+                status_item.setForeground(QColor("#6bff6b"))
+            else:
+                status_item.setText("● Connected")
+                status_item.setForeground(QColor("#6bff6b"))
         else:
             status_item.setText("○ Disconnected")
             status_item.setForeground(QColor("#ff6b6b"))
@@ -139,7 +165,7 @@ class ControllersTableWidget(QWidget):
         ex_item = QTableWidgetItem()
         if slot.is_connected:
             ex_item.setText("🔑")
-            ex_item.setToolTip("HidHide Access")
+            ex_item.setToolTip("Device Grabber Active")
             ex_item.setTextAlignment(Qt.AlignCenter)
         self.table.setItem(row, 3, ex_item)
 

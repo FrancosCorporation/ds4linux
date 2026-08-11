@@ -19,9 +19,9 @@ class DeviceMonitor(QObject):
     Emits device_added / device_removed signals when a DS4 is connected/disconnected.
     """
 
-    device_added = Signal(str)       # hidraw path
+    device_added = Signal(str)        # input event path (e.g. /dev/input/event27)
     device_removed = Signal(str)
-    scan_finished = Signal(list)     # list of initial paths
+    scan_finished = Signal(list)      # list of initial paths
 
     def __init__(self, parent: QObject | None = None):
         super().__init__(parent)
@@ -52,13 +52,12 @@ class DeviceMonitor(QObject):
         try:
             self._ctx = pyudev.Context()
             self._monitor = pyudev.Monitor.from_netlink(self._ctx)
-            self._monitor.filter_by(subsystem="hidraw")
+            self._monitor.filter_by(subsystem="input")
         except Exception as e:
             logger.error(f"pyudev error: {e}")
             self._running = False
             return
 
-        # Use QTimer to poll for events every 500ms
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._poll_events)
         self._timer.start(500)
@@ -67,7 +66,6 @@ class DeviceMonitor(QObject):
         if not self._monitor or not self._running:
             return
         try:
-            # poll() returns a single Action or None
             device = self._monitor.poll(timeout=0.1)
             if device:
                 self._on_udev_event(device)
@@ -80,27 +78,42 @@ class DeviceMonitor(QObject):
         elif device.action == "remove" and device.device_node:
             self._check_and_emit(device.device_node, added=False)
 
-    def _check_and_emit(self, path: str, added: bool) -> None:
+    def _is_real_ds4(self, device_path: str) -> bool:
+        """Check if a device is a genuine DS4 (not virtual uinput)."""
         try:
-            dev = evdev.InputDevice(path)
+            dev = evdev.InputDevice(device_path)
+            # Skip virtual uinput devices
+            if "uinput" in (dev.phys or "").lower():
+                return False
+            # Must be a DS4 vendor and recognized PID
             if dev.info.vendor != DS4_VID or dev.info.product not in DS4_PIDS:
-                return
+                return False
+            # Must have button capabilities (a real controller, not a sound device)
+            caps = dev.capabilities()
+            # EV_KEY = 0x01, check for button events
+            if 0x01 not in caps:
+                return False
+            # Verify it has typical DS4 buttons
+            keys = caps[0x01]  # EV_KEY
+            has_ds4_btn = any(k in keys for k in (
+                0x130, 0x131, 0x133, 0x134,  # cross/circle/square/triangle
+            ))
+            return has_ds4_btn
         except (OSError, PermissionError):
+            return False
+
+    def _check_and_emit(self, device_path: str, added: bool) -> None:
+        if not self._is_real_ds4(device_path):
             return
 
         if added:
-            self.device_added.emit(path)
+            self.device_added.emit(device_path)
         else:
-            self.device_removed.emit(path)
+            self.device_removed.emit(device_path)
 
     def _scan_existing(self) -> None:
         paths: List[str] = []
         for p in evdev.list_devices():
-            try:
-                dev = evdev.InputDevice(p)
-                if dev.info.vendor == DS4_VID and dev.info.product in DS4_PIDS:
-                    paths.append(p)
-            except (OSError, PermissionError):
-                continue
-
+            if self._is_real_ds4(p):
+                paths.append(p)
         self.scan_finished.emit(paths)

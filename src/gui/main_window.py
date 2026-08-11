@@ -16,14 +16,18 @@ from ..engine.multi_device_manager import MultiDeviceManager
 from .styles import get_stylesheet
 from .controllers_table import ControllersTableWidget
 from .controller_tab import ProfileTabWidget
+from ..constants import Path as _Path
 
 logger = logging.getLogger(__name__)
+
+_ICON_PATH = str(_Path(__file__).parent / "icons" / "ds4linux.png")
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(f"{APP_NAME} v{APP_VERSION}")
+        self.setWindowIcon(QIcon(_ICON_PATH))
         self.setMinimumSize(1100, 750)
         self.resize(1200, 800)
         self.setStyleSheet(get_stylesheet())

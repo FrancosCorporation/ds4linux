@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
     QCheckBox, QSlider, QTableWidget, QTableWidgetItem,
     QHeaderView, QAbstractItemView, QListWidget, QListWidgetItem,
     QGridLayout, QLineEdit, QRadioButton, QTabWidget, QFrame,
-    QScrollArea, QStyle
+    QScrollArea, QStyle, QMessageBox, QButtonGroup
 )
 from PySide6.QtCore import Qt, Signal, Slot, QSize, QRectF
 from PySide6.QtGui import QColor, QIcon, QPixmap, QPainter, QBrush, QPen, QFont
@@ -792,11 +792,11 @@ class ProfileTabWidget(QWidget):
     def _on_lightbar_color_changed(self, color: QColor):
         if self._current_profile:
             self._current_profile.led_color = (color.red(), color.green(), color.blue())
-            if self.slot._led_controller:
+            if self.slot and self.slot._led_controller:
                 self.slot._led_controller.set_color(color.red(), color.green(), color.blue())
 
     def _on_lightbar_brightness_changed(self, val: int):
         if self._current_profile:
             self._current_profile.led_brightness = val
-            if self.slot._led_controller:
+            if self.slot and self.slot._led_controller:
                 self.slot._led_controller.set_brightness(val)

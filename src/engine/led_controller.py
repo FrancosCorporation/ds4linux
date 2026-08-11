@@ -1,6 +1,8 @@
 from pathlib import Path
 from typing import Optional, Tuple
 import logging
+import fcntl
+import struct
 
 logger = logging.getLogger(__name__)
 
@@ -40,16 +42,17 @@ class LEDController:
         if not self._enabled:
             return
         self._current_color = (r, g, b)
-        if not self._color_paths:
-            return
-        try:
-            for color, value in zip(("red", "green", "blue"), (r, g, b)):
-                path = self._color_paths.get(color)
-                if path:
-                    with open(path, "w") as f:
-                        f.write(str(value))
-        except OSError as e:
-            logger.error(f"Failed to set LED color: {e}")
+        # Try sysfs LED interface first
+        if self._color_paths:
+            try:
+                for color, value in zip(("red", "green", "blue"), (r, g, b)):
+                    path = self._color_paths.get(color)
+                    if path:
+                        with open(path, "w") as f:
+                            f.write(str(value))
+                return
+            except OSError as e:
+                logger.warning(f"Failed to set LED color via sysfs: {e}")
 
     def set_brightness(self, brightness: int):
         if not self._enabled or not self._brightness_path:
@@ -74,11 +77,27 @@ class LEDController:
 
     @staticmethod
     def find_ds4_led(device_path: str) -> Optional[Path]:
+        """Find the LED sysfs path for a DS4 device."""
         try:
+            from ..constants import SYS_LEDS_BASE
             name = Path(device_path).name
-            for led in Path("/sys/class/leds").glob(f"*{name}*"):
-                if led.is_dir() and (led / "color_red").exists():
+
+            # Common patterns for DS4 Bluetooth LEDs
+            for pattern in ("*sony*", "*dualshock*", "*ds4*", "*wireless*"):
+                for led in SYS_LEDS_BASE.glob(pattern):
+                    if led.is_dir() and (led / "brightness").exists():
+                        return led
+
+            # Try by device name
+            dev_name = Path(device_path)
+            if dev_name.exists():
+                return None
+
+            # Try the event* pattern
+            event_name = Path(device_path).name  # e.g. "event27"
+            for led in SYS_LEDS_BASE.glob(f"*{event_name}*"):
+                if led.is_dir():
                     return led
-        except OSError:
+        except Exception:
             pass
         return None
