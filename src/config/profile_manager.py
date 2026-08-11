@@ -55,9 +55,10 @@ class ProfileManager(QObject):
     def load_profile(self, name: str) -> ProfileConfig:
         path = self.get_profile_path(name)
         if not path.exists():
-            if name.lower() == "default":
-                return self._create_default_profile()
-            return self.load_profile("Default")
+            # Fallback to Xbox 360 if requested profile doesn't exist
+            if name.lower() in ("xbox 360", "default"):
+                return self._create_xbox360_profile("Xbox 360")
+            return self.load_profile("Xbox 360")
 
         try:
             with open(path, "r") as f:
@@ -112,13 +113,14 @@ class ProfileManager(QObject):
     def get_current_profile_name(self) -> Optional[str]:
         return self._current_profile_name
 
-    def _create_default_profile(self, name: str = "Default") -> ProfileConfig:
-        """Create a default profile with DS4-to-Xbox button mapping."""
+    def _create_xbox360_profile(self, name: str = "Xbox 360") -> ProfileConfig:
+        """Create a DS4-to-Xbox 360 profile (emulates Xbox 360 controller)."""
         from ..constants import DS4_TO_XBOX_BTN_MAP
         profile = ProfileConfig(
             name=name,
             device_type=VirtualDeviceType.XBOX,
             button_maps=DS4_TO_XBOX_BTN_MAP.copy(),
+            led_color=(0, 212, 170),
         )
         path = self.get_profile_path(name)
         if not path.exists():
@@ -126,18 +128,20 @@ class ProfileManager(QObject):
                 data = self._profile_to_dict(profile)
                 with open(path, "w") as f:
                     json.dump(data, f, indent=2)
+                logger.info(f"Created profile: {name}")
+                self.profiles_changed.emit()
             except Exception as e:
-                logger.error(f"Failed to create default profile {name}: {e}")
+                logger.error(f"Failed to create profile {name}: {e}")
         return profile
 
-    def _create_ds4_passthrough_profile(self, name: str = "DS4 Passthrough") -> ProfileConfig:
-        """Create a profile that passes through DS4 button names unchanged (PS4 mode)."""
+    def _create_ps4_profile(self, name: str = "PlayStation 4") -> ProfileConfig:
+        """Create a DS4-to-PS4 profile (emulates DualShock 4 controller)."""
         from ..constants import DS4_TO_PS4_BTN_MAP
         profile = ProfileConfig(
             name=name,
             device_type=VirtualDeviceType.PS4,
             button_maps=DS4_TO_PS4_BTN_MAP.copy(),
-            led_color=(0, 212, 170),  # Default teal
+            led_color=(0, 212, 170),
         )
         path = self.get_profile_path(name)
         if not path.exists():
@@ -152,14 +156,14 @@ class ProfileManager(QObject):
         return profile
 
     def seed_default_profiles(self):
-        """Create the two default profiles on first launch or if they're missing.
+        """Create two preset profiles on first launch:
         
-        Profile 1: "Default" - DS4 → Xbox 360 button mapping
-        Profile 2: "DS4 Passthrough" - DS4 → PS4 button mapping (native names)
+        1. 'Xbox 360' - Emulates an Xbox 360 controller (DS4 buttons → Xbox layout)
+        2. 'PlayStation 4' - Emulates a DualShock 4 controller (native PS4 button names)
         """
         profiles_to_create = [
-            ("Default", self._create_default_profile),
-            ("DS4 Passthrough", self._create_ds4_passthrough_profile),
+            ("Xbox 360", self._create_xbox360_profile),
+            ("PlayStation 4", self._create_ps4_profile),
         ]
 
         for name, creator in profiles_to_create:
@@ -167,9 +171,9 @@ class ProfileManager(QObject):
             if not path.exists():
                 creator(name)
 
-        # Set Default as current if none exists
+        # Set Xbox 360 as default if none exists
         if not self._current_profile_name:
-            self._current_profile_name = "Default"
+            self._current_profile_name = "Xbox 360"
             self._save_last_used()
 
     def _profile_to_dict(self, profile: ProfileConfig) -> dict:

@@ -5,7 +5,6 @@ import logging
 from .virtual_device import VirtualDevice
 from .input_mapper import InputMapper
 from .led_controller import LEDController
-from .device_manager import DeviceManager
 
 logger = logging.getLogger(__name__)
 
@@ -13,13 +12,14 @@ logger = logging.getLogger(__name__)
 class WorkerThread(QThread):
     """
     Reads events from a single pre-grabbed InputDevice in a background thread.
-    The device grab, open, close lifecycle is handled by ControllerSlot / DeviceMonitor.
+    Optimized for minimal input lag - processes events as quickly as possible.
+    
+    The device grab, open, close lifecycle is handled by ControllerSlot.
     """
     device_connected = Signal(object)
     device_disconnected = Signal()
-    event_received = Signal(int, int, int)
-    log_message = Signal(str)
     battery_update = Signal(int)
+    log_message = Signal(str)
 
     def __init__(self):
         super().__init__()
@@ -42,12 +42,6 @@ class WorkerThread(QThread):
         """Called by ControllerSlot after attach_device() (device already grabbed)."""
         self._device = device
 
-    def _apply_led_settings(self):
-        if self._led_controller and self._input_mapper:
-            profile = self._input_mapper.profile
-            self._led_controller.set_color(*profile.led_color)
-            self._led_controller.set_brightness(profile.led_brightness)
-
     def _read_battery(self) -> int:
         if not self._device:
             return 0
@@ -61,25 +55,86 @@ class WorkerThread(QThread):
 
     def run(self):
         if not self._device:
-            self.log_message.emit("Worker started without device")
             return
 
         self._running = True
         self.device_connected.emit(self._device)
 
-        led_path = DeviceManager.get_led_path(self._device)
-        if led_path and self._led_controller:
-            self._led_controller.set_led_path(led_path)
-            self._apply_led_settings()
-
         battery = self._read_battery()
         self.battery_update.emit(battery)
 
+        # Get references for hot loop (avoid attribute lookups each iteration)
+        vdev = self._virtual_device
+        mapper = self._input_mapper
+        device = self._device
+        
+        if not vdev or not mapper:
+            return
+
+        write_event = vdev.write_event
+        sync = vdev.sync
+
+        # Get mapping dicts once
+        btn_map = mapper.profile.button_maps
+        
+        from ..constants import XBOX_ABS_MAP, PS4_ABS_MAP, VirtualDeviceType
+        if mapper.profile.device_type == VirtualDeviceType.XBOX:
+            abs_map = XBOX_ABS_MAP
+        else:
+            abs_map = PS4_ABS_MAP
+
+        # Precompute event type constants
+        EV_KEY = e.EV_KEY
+        EV_ABS = e.EV_ABS
+        EV_ABS_HAT0X = e.ABS_HAT0X
+        EV_ABS_HAT0Y = e.ABS_HAT0Y
+
+        # Button/axis state tracking
+        btn_state = mapper._btn_state
+        axis_state = mapper._axis_state
+
         try:
-            for event in self._device.read_loop():
+            for event in device.read_loop():
                 if not self._running:
                     break
-                self._process_event(event)
+
+                # Hot path - minimal processing for lowest input lag
+                if event.type == EV_KEY:
+                    code = event.code
+                    pressed = event.value == 1
+                    
+                    if code not in btn_map:
+                        continue
+                    
+                    prev_state = btn_state.get(code)
+                    if prev_state == pressed:
+                        continue
+                    
+                    btn_state[code] = pressed
+                    vcode = btn_map[code]
+                    val = 1 if pressed else 0
+                    write_event(EV_KEY, vcode, val)
+                    sync()
+
+                elif event.type == EV_ABS:
+                    code = event.code
+                    
+                    if code == EV_ABS_HAT0X or code == EV_ABS_HAT0Y:
+                        vcode = abs_map.get(code)
+                        if vcode is None:
+                            continue
+                        if axis_state.get(code) == event.value:
+                            continue
+                        axis_state[code] = event.value
+                        write_event(EV_ABS, vcode, event.value)
+                        sync()
+                    else:
+                        result = mapper.map_axis(code, event.value)
+                        if result:
+                            vcode, val = result
+                            write_event(EV_ABS, vcode, val)
+                            sync()
+
         except OSError as ex:
             logger.warning(f"Device read error: {ex}")
         except Exception as ex:
@@ -87,36 +142,6 @@ class WorkerThread(QThread):
         finally:
             self._running = False
             self.device_disconnected.emit()
-            self.log_message.emit("Worker stopped")
-
-    def _process_event(self, event):
-        if event.type == e.EV_KEY:
-            self._handle_key_event(event)
-        elif event.type == e.EV_ABS:
-            self._handle_abs_event(event)
-
-    def _handle_key_event(self, event):
-        if not self._input_mapper or not self._virtual_device:
-            return
-        result = self._input_mapper.map_button(event.code, event.value)
-        if result:
-            vcode, value = result
-            self._virtual_device.write_event(e.EV_KEY, vcode, value)
-            self._virtual_device.sync()
-            self.event_received.emit(e.EV_KEY, vcode, value)
-
-    def _handle_abs_event(self, event):
-        if not self._input_mapper or not self._virtual_device:
-            return
-        if event.code in (e.ABS_HAT0X, e.ABS_HAT0Y):
-            result = self._input_mapper.map_hat(event.code, event.value)
-        else:
-            result = self._input_mapper.map_axis(event.code, event.value)
-        if result:
-            vcode, value = result
-            self._virtual_device.write_event(e.EV_ABS, vcode, value)
-            self._virtual_device.sync()
-            self.event_received.emit(e.EV_ABS, vcode, value)
 
     def stop(self):
         self._running = False

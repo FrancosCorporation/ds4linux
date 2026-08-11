@@ -145,7 +145,9 @@ class ControllerSlot(QObject):
         return True
 
     def detach_device(self):
-        if self._device:
+        if not self._device:
+            return
+        if self._grabbed:
             try:
                 self._device.ungrab()
             except OSError:
@@ -178,7 +180,8 @@ class ControllerSlot(QObject):
         pass
 
     def _on_worker_disconnected(self):
-        pass
+        if self.is_connected:
+            self.detach_device()
 
     def start_worker(self):
         if self.is_connected and self._input_mapper and not self._worker.isRunning():
