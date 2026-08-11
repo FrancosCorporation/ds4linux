@@ -136,9 +136,15 @@ EOF
 }
 
 create_icon() {
-    log_info "Creating application icon..."
+    log_info "Installing application icon..."
     mkdir -p "$ICON_DIR"
-    python3 << 'PYEOF'
+    
+    # Copy the pre-made icon if available
+    if [ -f "$SCRIPT_DIR/src/icons/ds4linux.png" ]; then
+        cp "$SCRIPT_DIR/src/icons/ds4linux.png" "$ICON_DIR/"
+    else
+        # Generate a fallback icon
+        python3 << 'PYEOF'
 from PySide6.QtGui import QPixmap, QPainter, QColor, QBrush
 from PySide6.QtCore import Qt
 
@@ -183,6 +189,7 @@ painter.drawRoundedRect(146, 50, 80, 18, 8, 8)
 painter.end()
 pixmap.save("/usr/share/icons/hicolor/256x256/apps/ds4linux.png")
 PYEOF
+    fi
 }
 
 setup_user_permissions() {
