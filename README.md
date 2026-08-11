@@ -222,6 +222,73 @@ python3 -m src.main
 - Install: `sudo apt install libxcb-cursor0` (Ubuntu/Debian)
 - Or use Wayland: `QT_QPA_PLATFORM=wayland ds4linux`
 
+## Roadmap
+
+### v1.0.0 - Core Engine (Done)
+- [x] DS4 detection via udev (USB + Bluetooth)
+- [x] Exclusive device grab (evdev)
+- [x] Xbox 360 virtual device emulation (uinput)
+- [x] PS4 virtual device emulation (uinput)
+- [x] Button mapping (DS4 → Xbox / DS4 → PS4)
+- [x] Axis mapping with deadzone, sensitivity, anti-deadzone
+- [x] Trigger mapping (L2/R2)
+- [x] D-pad mapping
+- [x] Per-slot controller architecture
+- [x] QThread background event loop (zero GUI lag)
+
+### v1.1.0 - LED & UI (Done)
+- [x] LED lightbar control via `/sys/class/leds/`
+- [x] RGB color picker (HSV)
+- [x] LED presets (solid, pulse, rainbow, battery gradient)
+- [x] Per-profile LED colors
+- [x] Two-controller LED differentiation (per-slot input path)
+- [x] udev rules for non-root LED access
+- [x] install.sh LED permission fix (chown/chmod for existing devices)
+- [x] Dark/minimalist UI (DS4Windows-inspired)
+- [x] Controllers table (status, battery, profile, LED, edit)
+- [x] Per-controller profile tabs (Controls, Axis, Lightbar, Gyro, Other)
+- [x] Visual button mapping with DS4 outline
+- [x] Touchpad configuration (mouse/controls mode, gestures)
+- [x] Gyro support (mouse emulation, sensitivity, calibration)
+- [x] System tray integration
+- [x] SVG icon + desktop entry
+
+### v1.2.0 - Proton/Wine Compatibility (Done)
+- [x] USB bustype (0x03) on virtual device
+- [x] INPUT_PROP_GAMEPAD kernel property flag
+- [x] BTN_GAMEPAD explicit capability
+- [x] EV_FF/FF_RUMBLE declaration + force feedback forwarding
+- [x] select()-based async I/O for rumble (physical ↔ virtual)
+- [x] Unique phys per slot (`ds4linux-uinput-<slot>`)
+- [x] PS4 name: "Sony Interactive Entertainment Wireless Controller"
+- [x] README + documentation
+
+### v1.3.0 - In Progress
+- [ ] **ControllerTab UI refactor** - QScrollArea, QSizePolicy, margin/spacing cleanup, slider redesign, controller diagram L2/R2
+- [ ] **God of War verification** - End-to-end test with Heroic/Proton
+- [ ] **SDL GUID validation** - Confirm virtual device GUID matches expected Xbox/PS4 signatures
+- [ ] **Rumble magnitude mapping** - Proportional forwarding (game sends 0-1 → map to physical 0-255)
+
+### v1.4.0 - Planned
+- [ ] **Auto-profiles** - Switch profiles automatically per game (detect via window title / game binary)
+- [ ] **Profile import/export** - Share profiles as `.ds4profile` files
+- [ ] **DualSense (PS5) full support** - Adaptive triggers, haptic feedback, microphone LED
+- [ ] **Steam Input compatibility** - Coexist with Steam Input without conflicts
+- [ ] **Macro support** - Record and playback button sequences
+- [ ] **On-screen display (OSD)** - Battery/connection notifications overlay
+
+### v2.0.0 - Community & Ecosystem
+- [ ] **Multi-controller beyond 2** - Support 4+ controllers
+- [ ] **Xbox controller passthrough** - Use DS4Linux as a configuration layer for Xbox controllers too
+- [ ] **Motion aim integration** - Gyro-based aiming for FPS games (Steam Input style)
+- [ ] **Community profile repository** - Browse and download shared profiles
+- [ ] **Flatpak / AppImage packaging** - Universal Linux distribution
+- [ ] **AUR / RPM / DEB packages** - Native package manager support
+- [ ] **Wayland native support** - Full functionality under Wayland without XWayland
+- [ ] **CLI daemon mode** - Headless operation for servers / embedded setups
+- [ ] **Gamepad tester** - Built-in input visualization and diagnostics tool
+- [ ] **HID report forwarding** - Direct HID communication for games that bypass evdev
+
 ## License
 
 MIT License - See LICENSE file for details.
