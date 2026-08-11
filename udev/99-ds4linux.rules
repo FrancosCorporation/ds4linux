@@ -25,13 +25,12 @@ SUBSYSTEM=="hidraw", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="05c4", GROUP="i
 KERNEL=="uinput", MODE="0666", GROUP="input", TAG+="uaccess"
 
 # --- LED Sysfs Access ---
-# Match LED devices whose parent has Sony vendor ID
-# The LED subsystem exports the HID device's ATTRS for parent matching
+# Match LED devices whose parent HID device has Sony vendor ID
 SUBSYSTEM=="leds", ATTRS{idVendor}=="054c", GROUP="input", MODE="0660", TAG+="uaccess"
 
-# Fallback: Match by LED name pattern (inputNN:red, inputNN:green, inputNN:blue)
-# This is broader but covers all DS4 LED entries
-SUBSYSTEM=="leds", KERNEL==":*:red", GROUP="input", MODE="0660", TAG+="uaccess"
-SUBSYSTEM=="leds", KERNEL==":*:green", GROUP="input", MODE="0660", TAG+="uaccess"
-SUBSYSTEM=="leds", KERNEL==":*:blue", GROUP="input", MODE="0660", TAG+="uaccess"
-SUBSYSTEM=="leds", KERNEL==":*:brightness", GROUP="input", MODE="0660", TAG+="uaccess"
+# Fallback: Match DS4 LED entries by kernel name pattern
+# DS4 LEDs use naming like inputNN:red, inputNN:green, inputNN:blue, inputNN:global
+SUBSYSTEM=="leds", KERNEL=="input[0-9]*:red", GROUP="input", MODE="0660", TAG+="uaccess"
+SUBSYSTEM=="leds", KERNEL=="input[0-9]*:green", GROUP="input", MODE="0660", TAG+="uaccess"
+SUBSYSTEM=="leds", KERNEL=="input[0-9]*:blue", GROUP="input", MODE="0660", TAG+="uaccess"
+SUBSYSTEM=="leds", KERNEL=="input[0-9]*:global", GROUP="input", MODE="0660", TAG+="uaccess"

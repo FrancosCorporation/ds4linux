@@ -101,7 +101,21 @@ install_udev_rules() {
     log_info "Installing udev rules..."
     cp "$SCRIPT_DIR/udev/99-ds4linux.rules" "$UDEV_RULES_DIR/"
     udevadm control --reload-rules
-    udevadm trigger
+    udevadm trigger --action=add
+    # Fix permissions for any DS4 controllers already connected
+    # (udevadm trigger doesn't re-apply sysfs permissions on existing devices)
+    for led_dir in /sys/class/leds/input*:[rgb]*; do
+        if [ -f "$led_dir/brightness" ]; then
+            # Check if this LED belongs to a DS4 controller
+            led_vendor=$(cat "$led_dir/../../idVendor" 2>/dev/null || echo "")
+            if [ "$led_vendor" = "054c" ] || \
+               ls -la "$led_dir" 2>/dev/null | grep -q "054c"; then
+                chown root:input "$led_dir/brightness" 2>/dev/null || true
+                chown root:input "$led_dir" 2>/dev/null || true
+                chmod 0660 "$led_dir/brightness" 2>/dev/null || true
+            fi
+        fi
+    done
     log_success "udev rules installed and triggered"
 }
 
