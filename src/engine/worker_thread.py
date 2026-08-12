@@ -69,15 +69,11 @@ class WorkerThread(QThread):
         return 100
 
     def run(self):
-        use_hidraw = False
-        if self._device is not None and not self._device_grabbed:
-            # We opened the evdev device but could not grab it (another
-            # process, e.g. the game or Steam Input, owns the grab). Reading
-            # from evdev would fail with EBUSY, so fall back to HIDRAW.
-            logger.info(
-                "Worker: evdev device is grabbed by another process, "
-                "switching to HIDRAW mode"
-            )
+        use_hidraw = True
+        if self._device is not None and self._device_grabbed:
+            # Try evdev first (lower latency), fall back to HIDRAW if grab fails
+            logger.info(f"Worker: evdev grab succeeded, trying evdev mode")
+            use_hidraw = False
 
         if not self._device or use_hidraw or not self._device_grabbed:
             hidraw_path = find_ds4_hidraw()
@@ -151,7 +147,6 @@ class WorkerThread(QThread):
                     readable, _, _ = select.select(fds, [], [], 0.05)
                 except (ValueError, OSError):
                     continue
-
                 if phys_fd in readable and self._device:
                     try:
                         for event in self._device.read():
@@ -169,17 +164,70 @@ class WorkerThread(QThread):
                                 abs_map = PS4_ABS_MAP
 
                             if event.type == EV_KEY:
-                                code = event.code
-                                pressed = event.value == 1
-                                if code not in btn_map:
-                                    continue
-                                prev_state = btn_state.get(code)
-                                if prev_state == pressed:
-                                    continue
-                                btn_state[code] = pressed
-                                vcode = btn_map[code]
-                                write_event(EV_KEY, vcode, 1 if pressed else 0)
-                                sync()
+                                 code = event.code
+                                 pressed = event.value == 1
+                                 # Convert D-pad KEY events to HAT ABS events
+                                 if code == e.BTN_DPAD_UP:
+                                     axis_state[EV_ABS_HAT0Y] = -1 if pressed else axis_state.get(EV_ABS_HAT0Y, 0)
+                                     if not pressed and axis_state.get(EV_ABS_HAT0X, 0) != 0:
+                                         pass  # keep X value
+                                     elif not pressed:
+                                         axis_state[EV_ABS_HAT0Y] = 0
+                                     hvx = axis_state.get(EV_ABS_HAT0X, 0)
+                                     hvy = axis_state.get(EV_ABS_HAT0Y, 0)
+                                     vx = abs_map.get(EV_ABS_HAT0X)
+                                     vy = abs_map.get(EV_ABS_HAT0Y)
+                                     if vx is not None: write_event(EV_ABS, vx, hvx); sync()
+                                     if vy is not None: write_event(EV_ABS, vy, hvy); sync()
+                                     continue
+                                 elif code == e.BTN_DPAD_DOWN:
+                                     axis_state[EV_ABS_HAT0Y] = 1 if pressed else axis_state.get(EV_ABS_HAT0Y, 0)
+                                     if not pressed and axis_state.get(EV_ABS_HAT0X, 0) != 0:
+                                         pass
+                                     elif not pressed:
+                                         axis_state[EV_ABS_HAT0Y] = 0
+                                     hvx = axis_state.get(EV_ABS_HAT0X, 0)
+                                     hvy = axis_state.get(EV_ABS_HAT0Y, 0)
+                                     vx = abs_map.get(EV_ABS_HAT0X)
+                                     vy = abs_map.get(EV_ABS_HAT0Y)
+                                     if vx is not None: write_event(EV_ABS, vx, hvx); sync()
+                                     if vy is not None: write_event(EV_ABS, vy, hvy); sync()
+                                     continue
+                                 elif code == e.BTN_DPAD_LEFT:
+                                     axis_state[EV_ABS_HAT0X] = -1 if pressed else axis_state.get(EV_ABS_HAT0X, 0)
+                                     if not pressed and axis_state.get(EV_ABS_HAT0Y, 0) != 0:
+                                         pass
+                                     elif not pressed:
+                                         axis_state[EV_ABS_HAT0X] = 0
+                                     hvx = axis_state.get(EV_ABS_HAT0X, 0)
+                                     hvy = axis_state.get(EV_ABS_HAT0Y, 0)
+                                     vx = abs_map.get(EV_ABS_HAT0X)
+                                     vy = abs_map.get(EV_ABS_HAT0Y)
+                                     if vx is not None: write_event(EV_ABS, vx, hvx); sync()
+                                     if vy is not None: write_event(EV_ABS, vy, hvy); sync()
+                                     continue
+                                 elif code == e.BTN_DPAD_RIGHT:
+                                     axis_state[EV_ABS_HAT0X] = 1 if pressed else axis_state.get(EV_ABS_HAT0X, 0)
+                                     if not pressed and axis_state.get(EV_ABS_HAT0Y, 0) != 0:
+                                         pass
+                                     elif not pressed:
+                                         axis_state[EV_ABS_HAT0X] = 0
+                                     hvx = axis_state.get(EV_ABS_HAT0X, 0)
+                                     hvy = axis_state.get(EV_ABS_HAT0Y, 0)
+                                     vx = abs_map.get(EV_ABS_HAT0X)
+                                     vy = abs_map.get(EV_ABS_HAT0Y)
+                                     if vx is not None: write_event(EV_ABS, vx, hvx); sync()
+                                     if vy is not None: write_event(EV_ABS, vy, hvy); sync()
+                                     continue
+                                 if code not in btn_map:
+                                     continue
+                                 prev_state = btn_state.get(code)
+                                 if prev_state == pressed:
+                                     continue
+                                 btn_state[code] = pressed
+                                 vcode = btn_map[code]
+                                 write_event(EV_KEY, vcode, 1 if pressed else 0)
+                                 sync()
 
                             elif event.type == EV_ABS:
                                 code = event.code
