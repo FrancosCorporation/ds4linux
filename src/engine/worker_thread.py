@@ -38,6 +38,7 @@ class WorkerThread(QThread):
         self._led_controller: LEDController = None
         self._running = False
         self._device = None
+        self._device_grabbed = True
         self._hidraw_reader: DS4HIDRAWReader = None
         self._intentional_stop = False
 
@@ -53,6 +54,9 @@ class WorkerThread(QThread):
     def set_device(self, device):
         self._device = device
 
+    def set_device_grabbed(self, grabbed: bool):
+        self._device_grabbed = grabbed
+
     def _read_battery(self) -> int:
         if not self._device:
             return 0
@@ -66,7 +70,16 @@ class WorkerThread(QThread):
 
     def run(self):
         use_hidraw = False
-        if not self._device:
+        if self._device is not None and not self._device_grabbed:
+            # We opened the evdev device but could not grab it (another
+            # process, e.g. the game or Steam Input, owns the grab). Reading
+            # from evdev would fail with EBUSY, so fall back to HIDRAW.
+            logger.info(
+                "Worker: evdev device is grabbed by another process, "
+                "switching to HIDRAW mode"
+            )
+
+        if not self._device or use_hidraw or not self._device_grabbed:
             hidraw_path = find_ds4_hidraw()
             if hidraw_path:
                 self._hidraw_reader = DS4HIDRAWReader(hidraw_path)
@@ -113,7 +126,7 @@ class WorkerThread(QThread):
         btn_state = mapper._btn_state
         axis_state = mapper._axis_state
 
-        phys_fd = self._device.fd if self._device else -1
+        phys_fd = self._device.fd if (self._device and not use_hidraw) else -1
         virt_fd = vdev.uinput_fd
         hidraw_fd = self._hidraw_reader._fd if self._hidraw_reader else -1
 
@@ -194,7 +207,7 @@ class WorkerThread(QThread):
                         if report and len(report) >= 64:
                             last_dpad_x, last_dpad_y = self._process_hidraw_report(
                                 report, write_event, sync, btn_state, axis_state,
-                                mapper, last_dpad_x, last_dpad_y, e, EV_KEY, EV_ABS
+                                mapper, last_dpad_x, last_dpad_y, EV_KEY, EV_ABS
                             )
                     except Exception as ex:
                         logger.warning(f"Worker: hidraw read error: {ex}")
@@ -222,7 +235,7 @@ class WorkerThread(QThread):
             if not self._intentional_stop:
                 self.device_disconnected.emit()
 
-    def _process_hidraw_report(self, report, write_event, sync, btn_state, axis_state, mapper, last_dpad_x, last_dpad_y, EV_KEY, EV_ABS, _EV_KEY=None, _EV_ABS=None):
+    def _process_hidraw_report(self, report, write_event, sync, btn_state, axis_state, mapper, last_dpad_x, last_dpad_y, EV_KEY, EV_ABS):
         """Process a HIDRAW report. Returns (new_dpad_x, new_dpad_y)."""
         from evdev import ecodes as e
         from ..constants import XBOX_ABS_MAP, PS4_ABS_MAP, DS4Abs
@@ -236,18 +249,17 @@ class WorkerThread(QThread):
         abs_map = XBOX_ABS_MAP if profile.device_type == VirtualDeviceType.XBOX else PS4_ABS_MAP
 
         buttons = {
-            DS4Abs.SOUTH.value: bool(report[1] & DS4_BTN_CROSS),
-            DS4Abs.EAST.value: bool(report[1] & DS4_BTN_CIRCLE),
-            DS4Abs.NORTH.value: bool(report[1] & DS4_BTN_TRIANGLE),
-            DS4Abs.WEST.value: bool(report[1] & DS4_BTN_SQUARE),
-            DS4Abs.TL.value: bool(report[1] & DS4_BTN_L1),
-            DS4Abs.TR.value: bool(report[1] & DS4_BTN_R1),
-            DS4Abs.SELECT.value: bool(report[1] & DS4_BTN_SHARE),
-            DS4Abs.START.value: bool(report[1] & DS4_BTN_OPTIONS),
-            DS4Abs.THUMBL.value: bool(report[2] & DS4_BTN_L3),
-            DS4Abs.THUMBR.value: bool(report[2] & DS4_BTN_R3),
-            DS4Abs.PS.value: bool(report[2] & DS4_BTN_PS),
-            DS4Abs.TOUCHPAD.value: bool(report[2] & DS4_BTN_TOUCHPAD),
+            e.BTN_SOUTH: bool(report[1] & DS4_BTN_CROSS),
+            e.BTN_EAST: bool(report[1] & DS4_BTN_CIRCLE),
+            e.BTN_NORTH: bool(report[1] & DS4_BTN_TRIANGLE),
+            e.BTN_WEST: bool(report[1] & DS4_BTN_SQUARE),
+            e.BTN_TL: bool(report[1] & DS4_BTN_L1),
+            e.BTN_TR: bool(report[1] & DS4_BTN_R1),
+            e.BTN_SELECT: bool(report[1] & DS4_BTN_SHARE),
+            e.BTN_START: bool(report[1] & DS4_BTN_OPTIONS),
+            e.BTN_THUMBL: bool(report[2] & DS4_BTN_L3),
+            e.BTN_THUMBR: bool(report[2] & DS4_BTN_R3),
+            e.BTN_MODE: bool(report[2] & DS4_BTN_PS),
         }
 
         dpad_byte = (report[3] >> 4) & 0x0F

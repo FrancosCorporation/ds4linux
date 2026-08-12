@@ -103,7 +103,7 @@ class ControllerSlot(QObject):
 
     @property
     def is_connected(self) -> bool:
-        return self._device is not None and self._grabbed
+        return self._device is not None
 
     @property
     def battery_level(self) -> int:
@@ -206,6 +206,7 @@ class ControllerSlot(QObject):
     def start_worker(self):
         if self.is_connected and self._input_mapper and not self._worker.isRunning():
             self._worker.set_device(self._device)
+            self._worker.set_device_grabbed(self._grabbed)
             self._worker.start()
 
     def stop_worker(self):

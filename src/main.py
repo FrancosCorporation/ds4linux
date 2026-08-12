@@ -34,10 +34,11 @@ class InstanceChecker:
         if sys.platform == "win32":
             return f"\\\\.\\pipe\\{SOCKET_NAME}"
         else:
-            # QLocalServer places the socket at $XDG_RUNTIME_DIR/<name>
-            # or /tmp/<name> when XDG_RUNTIME_DIR is not set.
-            runtime_dir = os.environ.get("XDG_RUNTIME_DIR", "/tmp")
-            return str(Path(runtime_dir) / SOCKET_NAME)
+            # QLocalServer places the socket in Qt's temp path, which respects
+            # TMPDIR/TMP/TEMP. Use tempfile.gettempdir() so we remove the exact
+            # same file Qt will try to listen on.
+            import tempfile
+            return str(Path(tempfile.gettempdir()) / SOCKET_NAME)
     
     def start(self) -> bool:
         """Start the instance checker.
@@ -46,35 +47,39 @@ class InstanceChecker:
         Returns False if another instance is already running.
         """
         self._server = QLocalServer()
-        
-        # Remove stale socket from previous crash
+
+        # Probe whether another instance is already running. Connecting to
+        # the server socket is the only reliable check: listen() must NOT be
+        # attempted first, because removing the existing socket would let a
+        # second instance start.
+        probe = QLocalSocket()
+        probe.connectToServer(SOCKET_NAME)
+        if probe.waitForConnected(500):
+            # Another instance is running - signal it to show and exit
+            probe.write(b"SHOW\n")
+            probe.waitForBytesWritten(500)
+            probe.close()
+            logger.info("Another instance is running, sending SHOW signal")
+            return False
+
+        # No instance running: remove stale socket from previous crash
+        # and start listening.
         try:
             if os.path.exists(self._socket_path):
                 os.remove(self._socket_path)
         except Exception:
             pass
-        
+
         # Try to listen on the socket
         if not self._server.listen(SOCKET_NAME):
-            # Another instance is running - signal it to show and exit
-            self._signal_existing_instance()
+            logger.error("Failed to start instance server")
             return False
-        
+
         self._is_first_instance = True
         self._server.newConnection.connect(self._on_new_connection)
         logger.info("First instance started, listening for commands")
         return True
-    
-    def _signal_existing_instance(self):
-        """Send show signal to existing instance."""
-        socket = QLocalSocket()
-        socket.connectToServer(SOCKET_NAME)
-        if socket.waitForConnected(1000):
-            socket.write(b"SHOW\n")
-            socket.waitForBytesWritten(500)
-            socket.close()
-            logger.info("Sent SHOW signal to existing instance")
-    
+
     def _on_new_connection(self):
         """Handle incoming connection from another instance."""
         socket = self._server.nextPendingConnection()
