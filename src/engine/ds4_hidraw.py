@@ -164,12 +164,13 @@ def find_ds4_hidraw() -> Optional[str]:
         ctx = pyudev.Context()
         for dev in ctx.list_devices(subsystem='hidraw'):
             try:
-                sysfs_path = dev.device_path.replace('/dev/hidraw', '/sys/class/hidraw')
+                # dev.device_path is the kernel path, prepend /sys for sysfs
+                sysfs_path = '/sys' + dev.device_path
                 uevent_path = os.path.join(sysfs_path, 'device', 'uevent')
                 if os.path.exists(uevent_path):
                     uevent = open(uevent_path).read()
-                    # Match Sony vendor (054C) or Generic Wireless Controller
-                    if '054C' in uevent or '054c' in uevent or 'Wireless Controller' in uevent:
+                    # Match Sony vendor (054C) or Wireless Controller
+                    if '054C' in uevent or 'Wireless Controller' in uevent:
                         return dev.device_node
             except Exception:
                 continue
