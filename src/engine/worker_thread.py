@@ -24,6 +24,7 @@ class WorkerThread(QThread):
     # Emits (event_type, code, value) for raw input events — used by
     # mapping listen mode and wizard without interfering with normal mapping.
     raw_event = Signal(int, int, int)
+    fd_updated = Signal(int, int)  # phys_fd, virt_fd
 
     def __init__(self):
         super().__init__()
@@ -32,6 +33,7 @@ class WorkerThread(QThread):
         self._led_controller: LEDController = None
         self._running = False
         self._device: InputDevice = None
+        self._intentional_stop = False  # True when stopping for profile switch, not disconnect
 
     def set_virtual_device(self, vdev: VirtualDevice):
         self._virtual_device = vdev
@@ -58,7 +60,9 @@ class WorkerThread(QThread):
         return 100
 
     def run(self):
+        logger.info(f"Worker started, device={self._device}")
         if not self._device:
+            logger.error("Worker aborting: no device")
             return
 
         self._running = True
@@ -77,14 +81,12 @@ class WorkerThread(QThread):
         write_event = vdev.write_event
         sync = vdev.sync
 
-        btn_map = mapper.profile.button_maps
+        # NOTE: button/axis maps are resolved from mapper.profile on EVERY
+        # event so that runtime profile switches (Xbox <-> PS4) take effect
+        # immediately in the running worker. Do NOT cache these references.
 
-        from ..constants import XBOX_ABS_MAP, PS4_ABS_MAP, VirtualDeviceType
-        if mapper.profile.device_type == VirtualDeviceType.XBOX:
-            abs_map = XBOX_ABS_MAP
-        else:
-            abs_map = PS4_ABS_MAP
-
+        from ..constants import XBOX_ABS_MAP, PS4_ABS_MAP
+        from ..engine.virtual_device import VirtualDeviceType
         EV_KEY = e.EV_KEY
         EV_ABS = e.EV_ABS
         EV_FF = e.EV_FF
@@ -102,12 +104,39 @@ class WorkerThread(QThread):
 
         try:
             while self._running:
+                # Check device still exists
+                if not self._device:
+                    logger.info("Worker: device is None, breaking")
+                    break
+                
+                # Rebuild fds_to_watch on each iteration to handle fd changes
+                fds_to_watch = [phys_fd]
+                current_virt_fd = vdev.uinput_fd
+                if current_virt_fd >= 0:
+                    fds_to_watch.append(current_virt_fd)
+                    
                 try:
                     readable, _, _ = select.select(fds_to_watch, [], [], 0.1)
-                except (ValueError, OSError):
-                    break
+                except (ValueError, OSError) as ex:
+                    logger.warning(f"Worker: select error: {ex}")
+                    # Continue instead of breaking - fds may have changed
+                    continue
 
+                # Update phys_fd if it changed
+                current_phys_fd = device.fd if self._device else -1
+                if current_phys_fd != phys_fd:
+                    logger.info(f"Worker: phys_fd changed {phys_fd} -> {current_phys_fd}")
+                    phys_fd = current_phys_fd
+                    fds_to_watch = [phys_fd]
+                    current_virt_fd = vdev.uinput_fd
+                    if current_virt_fd >= 0:
+                        fds_to_watch.append(current_virt_fd)
+                
                 if phys_fd in readable:
+                    # Check device still exists before reading
+                    if not self._device:
+                        break
+                        
                     try:
                         # Read all available events (no timeout parameter)
                         for event in device.read():
@@ -117,6 +146,15 @@ class WorkerThread(QThread):
                             # Emit raw event for UI listen mode / wizard
                             if event.type in (EV_KEY, EV_ABS):
                                 self.raw_event.emit(event.type, event.code, event.value)
+
+                            # Resolve live mapping from the current profile so
+                            # profile/device-type switches apply in real time.
+                            profile = mapper.profile
+                            btn_map = profile.button_maps
+                            if profile.device_type == VirtualDeviceType.XBOX:
+                                abs_map = XBOX_ABS_MAP
+                            else:
+                                abs_map = PS4_ABS_MAP
 
                             if event.type == EV_KEY:
                                 code = event.code
@@ -153,10 +191,11 @@ class WorkerThread(QThread):
                                         vcode, val = result
                                         write_event(EV_ABS, vcode, val)
                                         sync()
-                    except OSError:
+                    except OSError as ex:
+                        logger.warning(f"Worker: read error: {ex}")
                         break
 
-                if virt_fd in readable:
+                if current_virt_fd in readable:
                     try:
                         for event in vdev._uinput.read():
                             if event.type == EV_FF:
@@ -174,11 +213,14 @@ class WorkerThread(QThread):
             logger.error(f"Unexpected error in worker: {ex}")
         finally:
             self._running = False
-            self.device_disconnected.emit()
+            if not self._intentional_stop:
+                self.device_disconnected.emit()
 
-    def stop(self):
+    def stop(self, intentional=False):
+        self._intentional_stop = intentional
         self._running = False
         self.wait(2000)
+        self._intentional_stop = False
 
     def is_device_connected(self) -> bool:
         return self._device is not None and self.isRunning()

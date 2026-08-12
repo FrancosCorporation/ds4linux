@@ -74,12 +74,24 @@ class ControllerSlot(QObject):
 
     @profile.setter
     def profile(self, value: ProfileConfig):
+        was_running = self._worker.isRunning()
+        if was_running:
+            self._worker.stop(intentional=True)
+            self._worker.wait(1000)
+
         self._profile = value
         self._input_mapper.set_profile(value)
         self._virtual_device.set_device_type(value.device_type)
+
+        # Reconnect worker to new virtual device
+        self._worker.set_virtual_device(self._virtual_device)
+
         if self._led_controller.is_available():
             self._led_controller.set_color(*value.led_color)
             self._led_controller.set_brightness(value.led_brightness)
+
+        if was_running and self.is_connected:
+            self.start_worker()
 
     @property
     def device(self) -> Optional[InputDevice]:
@@ -119,10 +131,10 @@ class ControllerSlot(QObject):
         try:
             self._device.grab()
             self._grabbed = True
+            logger.info(f"Grabbed {self._device_path}")
         except OSError as e:
-            logger.warning(f"grab() failed for {device_path}: {e}")
-            self.status = SlotStatus.ERROR
-            return False
+            logger.warning(f"grab() failed for {device_path}: {e} - continuing without grab")
+            self._grabbed = False
 
         if not self._virtual_device.is_active():
             self._virtual_device.create()

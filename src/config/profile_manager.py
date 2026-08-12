@@ -5,7 +5,8 @@ import logging
 
 from PySide6.QtCore import QObject, Signal
 
-from ..constants import PROFILE_DIR, CONFIG_FILE, VirtualDeviceType
+from ..constants import PROFILE_DIR, CONFIG_FILE
+from ..engine.virtual_device import VirtualDeviceType
 from ..engine.input_mapper import ProfileConfig, AxisConfig, TriggerConfig
 
 logger = logging.getLogger(__name__)

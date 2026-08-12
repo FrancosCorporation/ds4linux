@@ -201,6 +201,27 @@ class MultiDeviceManager(QObject):
                 slot.detach_device()
                 self.device_disconnected_signal.emit(slot.slot_id)
 
+    def apply_profile_to_all(self, profile_name: str) -> bool:
+        """Apply a named profile to every connected slot (auto-profile support).
+
+        The profile is loaded fresh from disk so edits made in the GUI are
+        picked up. Returns True if at least one slot got the profile.
+        """
+        if not profile_name:
+            return False
+        profile = self._profile_manager.load_profile(profile_name)
+        if not profile:
+            logger.warning(f"apply_profile_to_all: profile '{profile_name}' not found")
+            return False
+
+        applied = False
+        for slot in self._slots.values():
+            if slot.is_connected:
+                slot.set_profile(profile)
+                applied = True
+                logger.info(f"Slot {slot.slot_id} -> profile '{profile_name}'")
+        return applied
+
     def cleanup(self):
         """Properly clean up all resources - called on app close."""
         self._monitor.stop()

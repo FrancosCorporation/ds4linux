@@ -239,13 +239,8 @@ SUBSYSTEM=="leds", KERNEL=="input*:rgb:*", MODE="0666", TAG+="uaccess"
 VIRTUAL_DEVICE_TYPES = ("xbox", "ps4")
 
 
-class VirtualDeviceType(Enum):
-    XBOX = "xbox"
-    PS4 = "ps4"
-
-
 APP_NAME = "DS4Linux"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 ORG_NAME = "DS4Linux"
 ORG_DOMAIN = "ds4linux.app"
 

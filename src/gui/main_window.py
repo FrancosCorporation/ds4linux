@@ -17,9 +17,11 @@ from PySide6.QtGui import QIcon, QPixmap, QColor, QAction, QFont, QPainter
 
 from ..constants import APP_NAME, APP_VERSION, MAX_CONTROLLERS
 from ..engine.multi_device_manager import MultiDeviceManager
+from ..engine.auto_profile import AutoProfileManager
 from .styles import get_stylesheet
 from .controllers_table import ControllersTableWidget
 from .controller_tab import ProfileTabWidget
+from .auto_profiles_tab import AutoProfilesTab
 
 logger = logging.getLogger(__name__)
 
@@ -172,6 +174,9 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(get_stylesheet())
 
         self._multi_manager = MultiDeviceManager(max_slots=MAX_CONTROLLERS)
+        self._auto_profile = AutoProfileManager(
+            self._multi_manager._profile_manager
+        )
         self._profile_tabs = []
         self._profiles_tab: QTabWidget = None
         self._profiles_tabs: Dict[int, "ProfileTabWidget"] = {}
@@ -239,6 +244,7 @@ class MainWindow(QMainWindow):
         self.activateWindow()
 
     def _quit_application(self):
+        self._auto_profile.stop()
         self._multi_manager.cleanup()
         if self._tray_icon:
             self._tray_icon.hide()
@@ -247,7 +253,10 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         """Properly clean up all devices before closing."""
+        self._auto_profile.stop()
         self._multi_manager.cleanup()
+        # Give threads time to finish
+        import time; time.sleep(0.5)
         if self._tray_icon and self._tray_icon.isVisible():
             event.ignore()
             self.hide()
@@ -286,12 +295,9 @@ class MainWindow(QMainWindow):
         self._profiles_tab.addTab(placeholder, "Perfis")
         self._main_tabs.addTab(self._profiles_tab, "Perfis")
 
-        # Auto Profiles tab (placeholder)
-        auto_widget = QWidget()
-        auto_layout = QVBoxLayout(auto_widget)
-        auto_layout.addWidget(QLabel("Auto Profiles - Coming Soon"))
-        auto_layout.addStretch()
-        self._main_tabs.addTab(auto_widget, "Auto Profiles")
+        # Auto Profiles tab
+        self._auto_profiles_tab = AutoProfilesTab(self._auto_profile)
+        self._main_tabs.addTab(self._auto_profiles_tab, "Auto Profiles")
 
         # Settings tab
         self._create_settings_tab()
@@ -418,6 +424,12 @@ class MainWindow(QMainWindow):
 
         # Profile changes
         self._multi_manager._profile_manager.profiles_changed.connect(self._on_profiles_changed)
+
+        # Auto-profile signals
+        self._auto_profile.log_message.connect(self._on_log_message)
+        self._auto_profile.profile_apply_requested.connect(
+            self._multi_manager.apply_profile_to_all
+        )
 
     def _on_controller_edit(self, slot_id: int):
         """Open the single Profiles tab with the selected controller's profile."""

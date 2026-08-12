@@ -142,11 +142,22 @@ class VirtualDevice:
         return -1
 
     def set_device_type(self, device_type: VirtualDeviceType):
-        if device_type != self.device_type:
-            was_active = self.is_active()
+        """Update device type without destroying the virtual device."""
+        if device_type == self.device_type:
+            return
+
+        # Store old device type for logging
+        old_type = self.device_type
+
+        # Update type and capabilities
+        self.device_type = device_type
+        self._caps, self._name, self._vendor, self._product, self._version = \
+            self._build_capabilities()
+
+        # If device was active, destroy and recreate with new caps
+        if self.is_active():
+            was_active = True
             self.destroy()
-            self.device_type = device_type
-            self._caps, self._name, self._vendor, self._product, self._version = \
-                self._build_capabilities()
             if was_active:
                 self.create()
+                logger.info(f"Updated virtual device from {old_type.value} to {device_type.value}")

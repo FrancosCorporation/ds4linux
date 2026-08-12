@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal, Slot, QSize, QRectF
 from PySide6.QtGui import QColor, QIcon, QPixmap, QPainter, QBrush, QPen, QFont
 
-from ..constants import DS4Btn, XboxBtn, PS4Btn, VirtualDeviceType
+from ..constants import DS4Btn, XboxBtn, PS4Btn
 from ..engine.input_mapper import ProfileConfig, AxisConfig, TriggerConfig
 from ..engine.virtual_device import VirtualDeviceType as VDT
 from ..config.profile_manager import ProfileManager

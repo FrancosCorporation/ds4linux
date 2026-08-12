@@ -9,8 +9,8 @@ from ..constants import (
     DS4_TO_XBOX_BTN_MAP, DS4_TO_PS4_BTN_MAP,
     DS4_ABS_MAP, XBOX_ABS_MAP, PS4_ABS_MAP,
     MAX_AXIS_VALUE, MAX_TRIGGER_VALUE,
-    VirtualDeviceType
 )
+from ..engine.virtual_device import VirtualDeviceType
 
 
 class Stick(Enum):
@@ -73,6 +73,7 @@ class InputMapper:
 
     def set_profile(self, profile: ProfileConfig):
         self.profile = profile
+        self.reset_state()
 
     def map_button(self, ds4_code: int, value: int) -> Optional[tuple]:
         if ds4_code not in self.profile.button_maps:
@@ -95,10 +96,10 @@ class InputMapper:
 
         if ds4_code in (DS4Abs.X, DS4Abs.Y):
             cfg = self.profile.left_stick
-            normalized = self._normalize_axis(value, MAX_AXIS_VALUE, cfg)
+            normalized = self._normalize_axis(value, MAX_AXIS_VALUE, cfg, is_stick=True)
         elif ds4_code in (DS4Abs.RX, DS4Abs.RY):
             cfg = self.profile.right_stick
-            normalized = self._normalize_axis(value, MAX_AXIS_VALUE, cfg)
+            normalized = self._normalize_axis(value, MAX_AXIS_VALUE, cfg, is_stick=True)
         elif ds4_code == DS4Abs.Z:
             cfg = self.profile.left_trigger
             normalized = self._normalize_trigger(value, cfg)
@@ -123,29 +124,36 @@ class InputMapper:
         self._axis_state[ds4_code] = value
         return (virtual_code, value)
 
-    def _normalize_axis(self, raw: int, max_val: int, cfg: AxisConfig) -> int:
-        normalized = raw / max_val
-        if abs(normalized) < cfg.deadzone:
+    def _normalize_axis(self, raw: int, max_val: int, cfg: AxisConfig, is_stick: bool = False) -> int:
+        if is_stick:
+            # DS4 sends 0-255 with center at 128; virtual device expects -max_val..+max_val
+            normalized = (raw - 128) * (max_val / 127.0)
+        else:
+            normalized = raw
+
+        adj = abs(normalized)
+        deadzone_val = cfg.deadzone * max_val
+        if adj < deadzone_val:
             normalized = 0.0
         else:
             sign = 1 if normalized > 0 else -1
-            adj = (abs(normalized) - cfg.deadzone) / (1.0 - cfg.deadzone)
+            adj = (adj - deadzone_val) / (max_val * (1.0 - cfg.deadzone))
             adj = 1.0 - (1.0 - adj) * (1.0 - cfg.anti_deadzone)
             adj = min(1.0, adj * cfg.max_zone)
             adj = adj * cfg.sensitivity
-            normalized = sign * adj
-            
-        if cfg.square_stick:
+            normalized = sign * adj * max_val
+
+        if cfg.square_stick and is_stick:
             import math
             if abs(normalized) > 0.001:
                 sign_x = 1 if normalized > 0 else -1
-                norm = abs(normalized)
+                norm = abs(normalized) / max_val
                 squared = norm ** (1 + cfg.square_stick_value / 100.0)
-                normalized = sign_x * squared
-                
-        if cfg.inverted:
+                normalized = sign_x * squared * max_val
+
+        if cfg.inverted and is_stick:
             normalized = -normalized
-        return int(normalized * max_val)
+        return int(normalized)
 
     def _normalize_trigger(self, raw: int, cfg: TriggerConfig) -> int:
         normalized = raw / MAX_TRIGGER_VALUE
