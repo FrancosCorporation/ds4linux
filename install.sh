@@ -234,6 +234,21 @@ setup_user_permissions() {
     log_success "Users added to input group (re-login required)"
 }
 
+blacklist_hid_playstation() {
+    log_info "Blacklisting hid_playstation kernel module..."
+    
+    # Create blacklist file
+    cat > "$UDEV_RULES_DIR/../modprobe.d/blacklist-ds4linux.conf" << 'EOF'
+# Blacklist hid_playstation to allow DS4Linux to grab the DS4 controller
+# Without this, the kernel driver consumes all events and the controller
+# won't work properly with DS4Linux
+blacklist hid_playstation
+EOF
+    
+    log_success "hid_playstation blacklisted"
+    log_warning "Reboot required for changes to take effect"
+}
+
 main() {
     echo -e "${BLUE}╔═══════════════════════════════════════╗${NC}"
     echo -e "${BLUE}║       DS4Linux Installer v1.0        ║${NC}"
@@ -249,6 +264,7 @@ main() {
     create_virtualenv
     install_files
     install_udev_rules
+    blacklist_hid_playstation
     create_launcher
     create_desktop_entry
     create_icon
