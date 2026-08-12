@@ -240,7 +240,7 @@ VIRTUAL_DEVICE_TYPES = ("xbox", "ps4")
 
 
 APP_NAME = "DS4Linux"
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.3.1"
 ORG_NAME = "DS4Linux"
 ORG_DOMAIN = "ds4linux.app"
 
