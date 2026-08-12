@@ -30,12 +30,14 @@ class InstanceChecker:
         self._socket_path = self._get_socket_path()
     
     def _get_socket_path(self) -> str:
-        """Get the socket path for this instance."""
+        """Get the socket path used by QLocalServer for this instance."""
         if sys.platform == "win32":
             return f"\\\\.\\pipe\\{SOCKET_NAME}"
         else:
-            path = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / f"ds4linux-{os.getuid()}.sock"
-            return str(path)
+            # QLocalServer places the socket at $XDG_RUNTIME_DIR/<name>
+            # or /tmp/<name> when XDG_RUNTIME_DIR is not set.
+            runtime_dir = os.environ.get("XDG_RUNTIME_DIR", "/tmp")
+            return str(Path(runtime_dir) / SOCKET_NAME)
     
     def start(self) -> bool:
         """Start the instance checker.
