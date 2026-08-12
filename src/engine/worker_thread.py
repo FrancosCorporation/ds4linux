@@ -1,30 +1,35 @@
 from PySide6.QtCore import QThread, Signal
-from evdev import InputDevice, ecodes as e
 import select
 import logging
 
 from .virtual_device import VirtualDevice
 from .input_mapper import InputMapper
 from .led_controller import LEDController
+from .ds4_hidraw import DS4HIDRAWReader, find_ds4_hidraw
 
 logger = logging.getLogger(__name__)
 
+DS4_BTN_CROSS = 0x01
+DS4_BTN_CIRCLE = 0x02
+DS4_BTN_TRIANGLE = 0x04
+DS4_BTN_SQUARE = 0x08
+DS4_BTN_L1 = 0x10
+DS4_BTN_R1 = 0x20
+DS4_BTN_SHARE = 0x40
+DS4_BTN_OPTIONS = 0x80
+DS4_BTN_L3 = 0x01 << 8
+DS4_BTN_R3 = 0x02 << 8
+DS4_BTN_PS = 0x04 << 8
+DS4_BTN_TOUCHPAD = 0x08 << 8
+
 
 class WorkerThread(QThread):
-    """
-    Reads events from a single pre-grabbed InputDevice in a background thread.
-    Optimized for minimal input lag - processes events as quickly as possible.
-
-    The device grab, open, close lifecycle is handled by ControllerSlot.
-    """
     device_connected = Signal(object)
     device_disconnected = Signal()
     battery_update = Signal(int)
     log_message = Signal(str)
-    # Emits (event_type, code, value) for raw input events — used by
-    # mapping listen mode and wizard without interfering with normal mapping.
     raw_event = Signal(int, int, int)
-    fd_updated = Signal(int, int)  # phys_fd, virt_fd
+    fd_updated = Signal(int, int)
 
     def __init__(self):
         super().__init__()
@@ -32,8 +37,9 @@ class WorkerThread(QThread):
         self._input_mapper: InputMapper = None
         self._led_controller: LEDController = None
         self._running = False
-        self._device: InputDevice = None
-        self._intentional_stop = False  # True when stopping for profile switch, not disconnect
+        self._device = None
+        self._hidraw_reader: DS4HIDRAWReader = None
+        self._intentional_stop = False
 
     def set_virtual_device(self, vdev: VirtualDevice):
         self._virtual_device = vdev
@@ -44,8 +50,7 @@ class WorkerThread(QThread):
     def set_led_controller(self, led: LEDController):
         self._led_controller = led
 
-    def set_device(self, device: InputDevice):
-        """Called by ControllerSlot after attach_device() (device already grabbed)."""
+    def set_device(self, device):
         self._device = device
 
     def _read_battery(self) -> int:
@@ -60,33 +65,45 @@ class WorkerThread(QThread):
         return 100
 
     def run(self):
-        logger.info(f"Worker started, device={self._device}")
+        use_hidraw = False
         if not self._device:
-            logger.error("Worker aborting: no device")
-            return
+            hidraw_path = find_ds4_hidraw()
+            if hidraw_path:
+                self._hidraw_reader = DS4HIDRAWReader(hidraw_path)
+                if self._hidraw_reader.open():
+                    use_hidraw = True
+                    logger.info(f"Worker: using HIDRAW mode {hidraw_path}")
+                    self.device_connected.emit(None)
+                else:
+                    logger.error("Worker: no device, aborting")
+                    self._running = False
+                    if not self._intentional_stop:
+                        self.device_disconnected.emit()
+                    return
+            else:
+                logger.error("Worker: no device or hidraw, aborting")
+                self._running = False
+                if not self._intentional_stop:
+                    self.device_disconnected.emit()
+                return
+        else:
+            logger.info(f"Worker: using evdev mode, device={self._device}")
 
         self._running = True
         self.device_connected.emit(self._device)
 
-        battery = self._read_battery()
-        self.battery_update.emit(battery)
-
         vdev = self._virtual_device
         mapper = self._input_mapper
-        device = self._device
-
         if not vdev or not mapper:
             return
 
         write_event = vdev.write_event
         sync = vdev.sync
 
-        # NOTE: button/axis maps are resolved from mapper.profile on EVERY
-        # event so that runtime profile switches (Xbox <-> PS4) take effect
-        # immediately in the running worker. Do NOT cache these references.
-
-        from ..constants import XBOX_ABS_MAP, PS4_ABS_MAP
+        from evdev import ecodes as e
+        from ..constants import XBOX_ABS_MAP, PS4_ABS_MAP, DS4Abs
         from ..engine.virtual_device import VirtualDeviceType
+
         EV_KEY = e.EV_KEY
         EV_ABS = e.EV_ABS
         EV_FF = e.EV_FF
@@ -96,59 +113,41 @@ class WorkerThread(QThread):
         btn_state = mapper._btn_state
         axis_state = mapper._axis_state
 
-        phys_fd = device.fd
+        phys_fd = self._device.fd if self._device else -1
         virt_fd = vdev.uinput_fd
-        fds_to_watch = [phys_fd]
-        if virt_fd >= 0:
-            fds_to_watch.append(virt_fd)
+        hidraw_fd = self._hidraw_reader._fd if self._hidraw_reader else -1
+
+        last_dpad_x = 0
+        last_dpad_y = 0
 
         try:
             while self._running:
-                # Check device still exists
-                if not self._device:
-                    logger.info("Worker: device is None, breaking")
-                    break
-                
-                # Rebuild fds_to_watch on each iteration to handle fd changes
-                fds_to_watch = [phys_fd]
+                fds = []
+                if phys_fd >= 0:
+                    fds.append(phys_fd)
                 current_virt_fd = vdev.uinput_fd
                 if current_virt_fd >= 0:
-                    fds_to_watch.append(current_virt_fd)
-                    
+                    fds.append(current_virt_fd)
+                if hidraw_fd >= 0:
+                    fds.append(hidraw_fd)
+
+                if not fds:
+                    break
+
                 try:
-                    readable, _, _ = select.select(fds_to_watch, [], [], 0.1)
-                except (ValueError, OSError) as ex:
-                    logger.warning(f"Worker: select error: {ex}")
-                    # Continue instead of breaking - fds may have changed
+                    readable, _, _ = select.select(fds, [], [], 0.05)
+                except (ValueError, OSError):
                     continue
 
-                # Update phys_fd if it changed
-                current_phys_fd = device.fd if self._device else -1
-                if current_phys_fd != phys_fd:
-                    logger.info(f"Worker: phys_fd changed {phys_fd} -> {current_phys_fd}")
-                    phys_fd = current_phys_fd
-                    fds_to_watch = [phys_fd]
-                    current_virt_fd = vdev.uinput_fd
-                    if current_virt_fd >= 0:
-                        fds_to_watch.append(current_virt_fd)
-                
-                if phys_fd in readable:
-                    # Check device still exists before reading
-                    if not self._device:
-                        break
-                        
+                if phys_fd in readable and self._device:
                     try:
-                        # Read all available events (no timeout parameter)
-                        for event in device.read():
+                        for event in self._device.read():
                             if not self._running:
                                 break
 
-                            # Emit raw event for UI listen mode / wizard
                             if event.type in (EV_KEY, EV_ABS):
                                 self.raw_event.emit(event.type, event.code, event.value)
 
-                            # Resolve live mapping from the current profile so
-                            # profile/device-type switches apply in real time.
                             profile = mapper.profile
                             btn_map = profile.button_maps
                             if profile.device_type == VirtualDeviceType.XBOX:
@@ -159,24 +158,19 @@ class WorkerThread(QThread):
                             if event.type == EV_KEY:
                                 code = event.code
                                 pressed = event.value == 1
-
                                 if code not in btn_map:
                                     continue
-
                                 prev_state = btn_state.get(code)
                                 if prev_state == pressed:
                                     continue
-
                                 btn_state[code] = pressed
                                 vcode = btn_map[code]
-                                val = 1 if pressed else 0
-                                write_event(EV_KEY, vcode, val)
+                                write_event(EV_KEY, vcode, 1 if pressed else 0)
                                 sync()
 
                             elif event.type == EV_ABS:
                                 code = event.code
-
-                                if code == EV_ABS_HAT0X or code == EV_ABS_HAT0Y:
+                                if code in (EV_ABS_HAT0X, EV_ABS_HAT0Y):
                                     vcode = abs_map.get(code)
                                     if vcode is None:
                                         continue
@@ -188,20 +182,30 @@ class WorkerThread(QThread):
                                 else:
                                     result = mapper.map_axis(code, event.value)
                                     if result:
-                                        vcode, val = result
-                                        write_event(EV_ABS, vcode, val)
+                                        write_event(EV_ABS, result[0], result[1])
                                         sync()
                     except OSError as ex:
-                        logger.warning(f"Worker: read error: {ex}")
+                        logger.warning(f"Worker: evdev read error: {ex}")
                         break
 
-                if current_virt_fd in readable:
+                if hidraw_fd in readable and self._hidraw_reader:
+                    try:
+                        report = self._hidraw_reader.read_report()
+                        if report and len(report) >= 64:
+                            last_dpad_x, last_dpad_y = self._process_hidraw_report(
+                                report, write_event, sync, btn_state, axis_state,
+                                mapper, last_dpad_x, last_dpad_y, e, EV_KEY, EV_ABS
+                            )
+                    except Exception as ex:
+                        logger.warning(f"Worker: hidraw read error: {ex}")
+
+                if current_virt_fd in readable and self._device:
                     try:
                         for event in vdev._uinput.read():
                             if event.type == EV_FF:
                                 try:
-                                    device.write(EV_FF, event.code, event.value)
-                                    device.syn()
+                                    self._device.write(EV_FF, event.code, event.value)
+                                    self._device.syn()
                                 except OSError:
                                     pass
                     except OSError:
@@ -213,8 +217,88 @@ class WorkerThread(QThread):
             logger.error(f"Unexpected error in worker: {ex}")
         finally:
             self._running = False
+            if self._hidraw_reader:
+                self._hidraw_reader.close()
             if not self._intentional_stop:
                 self.device_disconnected.emit()
+
+    def _process_hidraw_report(self, report, write_event, sync, btn_state, axis_state, mapper, last_dpad_x, last_dpad_y, EV_KEY, EV_ABS, _EV_KEY=None, _EV_ABS=None):
+        """Process a HIDRAW report. Returns (new_dpad_x, new_dpad_y)."""
+        from evdev import ecodes as e
+        from ..constants import XBOX_ABS_MAP, PS4_ABS_MAP, DS4Abs
+        from ..engine.virtual_device import VirtualDeviceType
+
+        _EV_KEY = EV_KEY
+        _EV_ABS = EV_ABS
+
+        profile = mapper.profile
+        btn_map = profile.button_maps
+        abs_map = XBOX_ABS_MAP if profile.device_type == VirtualDeviceType.XBOX else PS4_ABS_MAP
+
+        buttons = {
+            DS4Abs.SOUTH.value: bool(report[1] & DS4_BTN_CROSS),
+            DS4Abs.EAST.value: bool(report[1] & DS4_BTN_CIRCLE),
+            DS4Abs.NORTH.value: bool(report[1] & DS4_BTN_TRIANGLE),
+            DS4Abs.WEST.value: bool(report[1] & DS4_BTN_SQUARE),
+            DS4Abs.TL.value: bool(report[1] & DS4_BTN_L1),
+            DS4Abs.TR.value: bool(report[1] & DS4_BTN_R1),
+            DS4Abs.SELECT.value: bool(report[1] & DS4_BTN_SHARE),
+            DS4Abs.START.value: bool(report[1] & DS4_BTN_OPTIONS),
+            DS4Abs.THUMBL.value: bool(report[2] & DS4_BTN_L3),
+            DS4Abs.THUMBR.value: bool(report[2] & DS4_BTN_R3),
+            DS4Abs.PS.value: bool(report[2] & DS4_BTN_PS),
+            DS4Abs.TOUCHPAD.value: bool(report[2] & DS4_BTN_TOUCHPAD),
+        }
+
+        dpad_byte = (report[3] >> 4) & 0x0F
+        dpad_map = {
+            0: (0, 0), 3: (0, 1), 6: (-1, 0), 8: (0, -1), 11: (1, 0),
+            1: (1, 1), 2: (1, 1), 4: (-1, 1), 5: (-1, 1), 7: (-1, -1),
+            9: (1, -1), 10: (1, -1), 12: (-1, -1), 13: (-1, -1),
+            14: (-1, 0), 15: (1, 1),
+        }
+        dpad_x, dpad_y = dpad_map.get(dpad_byte, (0, 0))
+
+        if dpad_x != last_dpad_x:
+            code = abs_map.get(DS4Abs.HAT0X.value)
+            if code is not None:
+                write_event(_EV_ABS, code, dpad_x)
+                sync()
+
+        if dpad_y != last_dpad_y:
+            code = abs_map.get(DS4Abs.HAT0Y.value)
+            if code is not None:
+                write_event(_EV_ABS, code, dpad_y)
+                sync()
+
+        lx, ly = report[4], report[5]
+        rx, ry = report[6], report[7]
+        l2, r2 = report[8], report[9]
+
+        for code, val in [(DS4Abs.X, lx), (DS4Abs.Y, ly), (DS4Abs.RX, rx), (DS4Abs.RY, ry)]:
+            result = mapper.map_axis(code.value, val)
+            if result:
+                write_event(_EV_ABS, result[0], result[1])
+                sync()
+
+        for code, val in [(DS4Abs.Z, l2), (DS4Abs.RZ, r2)]:
+            result = mapper.map_axis(code.value, val)
+            if result:
+                write_event(_EV_ABS, result[0], result[1])
+                sync()
+
+        for ds4_code, pressed in buttons.items():
+            if ds4_code not in btn_map:
+                continue
+            prev_state = btn_state.get(ds4_code)
+            if prev_state == pressed:
+                continue
+            btn_state[ds4_code] = pressed
+            write_event(_EV_KEY, btn_map[ds4_code], 1 if pressed else 0)
+            sync()
+            self.raw_event.emit(_EV_KEY, ds4_code, 1 if pressed else 0)
+
+        return dpad_x, dpad_y
 
     def stop(self, intentional=False):
         self._intentional_stop = intentional
@@ -223,4 +307,4 @@ class WorkerThread(QThread):
         self._intentional_stop = False
 
     def is_device_connected(self) -> bool:
-        return self._device is not None and self.isRunning()
+        return (self._device is not None or self._hidraw_reader is not None) and self.isRunning()
