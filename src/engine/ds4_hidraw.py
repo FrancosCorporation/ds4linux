@@ -157,23 +157,19 @@ class DS4HIDRAWReader:
 
 
 def find_ds4_hidraw() -> Optional[str]:
-    """Find the hidraw device for the DS4 controller."""
+    """Find the hidraw device for a DS4/Wireless Controller."""
     import pyudev
     
     try:
         ctx = pyudev.Context()
         for dev in ctx.list_devices(subsystem='hidraw'):
-            # Check if this hidraw device is for a DS4
-            device_path = dev.device_path
-            # Get the parent HID device
             try:
-                # Navigate up the sysfs tree to find vendor/product
-                sysfs_path = device_path.replace('/dev/hidraw', '/sys/class/hidraw')
-                device_link = os.path.join(sysfs_path, 'device')
-                if os.path.islink(device_link):
-                    target = os.readlink(device_link)
-                    # Check if it's a DS4 (vendor 054c)
-                    if '054c' in target:
+                sysfs_path = dev.device_path.replace('/dev/hidraw', '/sys/class/hidraw')
+                uevent_path = os.path.join(sysfs_path, 'device', 'uevent')
+                if os.path.exists(uevent_path):
+                    uevent = open(uevent_path).read()
+                    # Match Sony vendor (054C) or Generic Wireless Controller
+                    if '054C' in uevent or '054c' in uevent or 'Wireless Controller' in uevent:
                         return dev.device_node
             except Exception:
                 continue
