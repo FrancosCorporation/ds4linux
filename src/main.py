@@ -18,7 +18,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Socket server for inter-instance communication
-SOCKET_NAME = "ds4linux-socket"
+SOCKET_NAME = f"ds4linux-socket-{os.getuid()}"
 
 
 class InstanceChecker:
