@@ -499,11 +499,13 @@ class MainWindow(QMainWindow):
             return
 
         # Remove existing profile editor if any
-        self._profiles_tab.removeTab(0)
+        while self._profiles_tab.count() > 0:
+            self._profiles_tab.removeTab(0)
 
         # Create a new ProfileTabWidget for this controller
         profile_tab = ProfileTabWidget(slot_id, slot, self._multi_manager._profile_manager)
         profile_tab.save_requested.connect(self._on_profile_saved)
+        profile_tab.profile_saved.connect(self._on_profile_saved)
         self._profiles_tab.addTab(profile_tab, f"Controller {slot_id + 1}")
 
         # Switch to Profiles tab

@@ -41,6 +41,7 @@ class WorkerThread(QThread):
         self._device_grabbed = True
         self._hidraw_reader: DS4HIDRAWReader = None
         self._intentional_stop = False
+        self._hidraw_fd: int = -1
 
     def set_virtual_device(self, vdev: VirtualDevice):
         self._virtual_device = vdev
@@ -69,46 +70,84 @@ class WorkerThread(QThread):
         return 100
 
     def run(self):
-        use_hidraw = True
-        # Always use HIDRAW for reliable D-pad input
-        if self._device is not None and not self._device_grabbed:
-            logger.info("Worker: evdev grabbed by another process, using HIDRAW")
+        # ------------------------------------------------------------------
+        # Phase 1: Determine input source (evdev vs HIDRAW)
+        # ------------------------------------------------------------------
+        print("[WORKER] run() started")
+        print(f"[WORKER]   _device={self._device} (path={self._device.path if self._device else 'NONE'})")
+        print(f"[WORKER]   _device_grabbed={self._device_grabbed}")
+        print(f"[WORKER]   _virtual_device={self._virtual_device}")
+        print(f"[WORKER]   _input_mapper={self._input_mapper}")
 
-        if not self._device or use_hidraw or not self._device_grabbed:
+        if not self._virtual_device or not self._input_mapper:
+            print("[WORKER] FATAL: Missing virtual_device or input_mapper — aborting")
+            self._running = False
+            if not self._intentional_stop:
+                self.device_disconnected.emit()
+            return
+
+        vdev = self._virtual_device
+        if not vdev.is_active():
+            print("[WORKER] Creating virtual device...")
+            if not vdev.create():
+                print("[WORKER] FATAL: Failed to create virtual device — aborting")
+                self._running = False
+                if not self._intentional_stop:
+                    self.device_disconnected.emit()
+                return
+            print(f"[WORKER] Virtual device created! fd={vdev.uinput_fd}")
+        else:
+            print(f"[WORKER] Virtual device already active (fd={vdev.uinput_fd})")
+
+        # Determine mode: prefer evdev grab, fall back to HIDRAW
+        use_hidraw = False
+        if self._device is None:
+            print("[WORKER] No evdev device — using HIDRAW")
+            use_hidraw = True
+        elif not self._device_grabbed:
+            print("[WORKER] evdev not grabbed — using HIDRAW")
+            use_hidraw = True
+        else:
+            print(f"[WORKER] Using evdev mode: {self._device.path} (grabbed={self._device_grabbed})")
+
+        # ------------------------------------------------------------------
+        # Phase 2: Open HIDRAW if needed
+        # ------------------------------------------------------------------
+        if use_hidraw:
             hidraw_path = find_ds4_hidraw()
             if hidraw_path:
+                print(f"[WORKER] Opening HIDRAW: {hidraw_path}")
                 self._hidraw_reader = DS4HIDRAWReader(hidraw_path)
                 if self._hidraw_reader.open():
-                    use_hidraw = True
-                    logger.info(f"Worker: using HIDRAW mode {hidraw_path}")
-                    self.device_connected.emit(None)
+                    self._hidraw_fd = self._hidraw_reader._fd
+                    print(f"[WORKER] HIDRAW opened successfully (fd={self._hidraw_fd})")
                 else:
-                    logger.error("Worker: no device, aborting")
+                    print("[WORKER] FATAL: HIDRAW open failed — aborting")
                     self._running = False
                     if not self._intentional_stop:
                         self.device_disconnected.emit()
                     return
             else:
-                logger.error("Worker: no device or hidraw, aborting")
+                print("[WORKER] FATAL: No HIDRAW device found — aborting")
                 self._running = False
                 if not self._intentional_stop:
                     self.device_disconnected.emit()
                 return
         else:
-            logger.info(f"Worker: using evdev mode, device={self._device}")
+            print("[WORKER] HIDRAW skipped (using evdev)")
 
+        # ------------------------------------------------------------------
+        # Phase 3: Start main event loop
+        # ------------------------------------------------------------------
+        print("[WORKER] Starting main event loop")
         self._running = True
         self.device_connected.emit(self._device)
 
-        vdev = self._virtual_device
         mapper = self._input_mapper
-        if not vdev or not mapper:
-            return
-
         write_event = vdev.write_event
         sync = vdev.sync
 
-        from evdev import ecodes as e
+        from evdev import ecodes as e, InputDevice as EvdevInputDevice
         from ..constants import XBOX_ABS_MAP, PS4_ABS_MAP, DS4Abs
         from ..engine.virtual_device import VirtualDeviceType
 
@@ -124,7 +163,9 @@ class WorkerThread(QThread):
         phys_fd = self._device.fd if (self._device and not use_hidraw) else -1
         virt_fd = vdev.uinput_fd
         event_fd = vdev.event_fd
-        hidraw_fd = self._hidraw_reader._fd if self._hidraw_reader else -1
+        hidraw_fd = self._hidraw_fd
+
+        print(f"[WORKER] Loop fds: phys={phys_fd} virt={virt_fd} event={event_fd} hidraw={hidraw_fd}")
 
         last_dpad_x = 0
         last_dpad_y = 0
@@ -137,20 +178,26 @@ class WorkerThread(QThread):
                 current_virt_fd = vdev.uinput_fd
                 if current_virt_fd >= 0:
                     fds.append(current_virt_fd)
-                current_event_fd = vdev.event_fd
+                current_event_fd = event_fd  # Use cached fd, not property
                 if current_event_fd >= 0:
                     fds.append(current_event_fd)
                 if hidraw_fd >= 0:
                     fds.append(hidraw_fd)
 
                 if not fds:
+                    print("[WORKER] No file descriptors — breaking loop")
                     break
 
                 try:
                     readable, _, _ = select.select(fds, [], [], 0.05)
-                except (ValueError, OSError):
-                    continue
-                if phys_fd in readable and self._device:
+                except (ValueError, OSError) as ex:
+                    print(f"[WORKER] select() error: {ex}")
+                    break
+
+                # ------------------------------------------------------------------
+                # evdev path
+                # ------------------------------------------------------------------
+                if phys_fd in readable and self._device and not use_hidraw:
                     try:
                         for event in self._device.read():
                             if not self._running:
@@ -161,94 +208,113 @@ class WorkerThread(QThread):
 
                             profile = mapper.profile
                             btn_map = profile.button_maps
-                            if profile.device_type == VirtualDeviceType.XBOX:
-                                abs_map = XBOX_ABS_MAP
-                            else:
-                                abs_map = PS4_ABS_MAP
+                            abs_map = XBOX_ABS_MAP if profile.device_type == VirtualDeviceType.XBOX else PS4_ABS_MAP
 
                             if event.type == EV_KEY:
-                                 code = event.code
-                                 pressed = event.value == 1
-                                 # Convert D-pad KEY events to HAT ABS events
-                                 if code == e.BTN_DPAD_UP:
-                                     axis_state[EV_ABS_HAT0Y] = -1 if pressed else axis_state.get(EV_ABS_HAT0Y, 0)
-                                     if not pressed and axis_state.get(EV_ABS_HAT0X, 0) != 0:
-                                         pass  # keep X value
-                                     elif not pressed:
-                                         axis_state[EV_ABS_HAT0Y] = 0
-                                     hvx = axis_state.get(EV_ABS_HAT0X, 0)
-                                     hvy = axis_state.get(EV_ABS_HAT0Y, 0)
-                                     vx = abs_map.get(EV_ABS_HAT0X)
-                                     vy = abs_map.get(EV_ABS_HAT0Y)
-                                     if vx is not None: write_event(EV_ABS, vx, hvx); sync()
-                                     if vy is not None: write_event(EV_ABS, vy, hvy); sync()
-                                     continue
-                                 elif code == e.BTN_DPAD_DOWN:
-                                     axis_state[EV_ABS_HAT0Y] = 1 if pressed else axis_state.get(EV_ABS_HAT0Y, 0)
-                                     if not pressed and axis_state.get(EV_ABS_HAT0X, 0) != 0:
-                                         pass
-                                     elif not pressed:
-                                         axis_state[EV_ABS_HAT0Y] = 0
-                                     hvx = axis_state.get(EV_ABS_HAT0X, 0)
-                                     hvy = axis_state.get(EV_ABS_HAT0Y, 0)
-                                     vx = abs_map.get(EV_ABS_HAT0X)
-                                     vy = abs_map.get(EV_ABS_HAT0Y)
-                                     if vx is not None: write_event(EV_ABS, vx, hvx); sync()
-                                     if vy is not None: write_event(EV_ABS, vy, hvy); sync()
-                                     continue
-                                 elif code == e.BTN_DPAD_LEFT:
-                                     axis_state[EV_ABS_HAT0X] = -1 if pressed else axis_state.get(EV_ABS_HAT0X, 0)
-                                     if not pressed and axis_state.get(EV_ABS_HAT0Y, 0) != 0:
-                                         pass
-                                     elif not pressed:
-                                         axis_state[EV_ABS_HAT0X] = 0
-                                     hvx = axis_state.get(EV_ABS_HAT0X, 0)
-                                     hvy = axis_state.get(EV_ABS_HAT0Y, 0)
-                                     vx = abs_map.get(EV_ABS_HAT0X)
-                                     vy = abs_map.get(EV_ABS_HAT0Y)
-                                     if vx is not None: write_event(EV_ABS, vx, hvx); sync()
-                                     if vy is not None: write_event(EV_ABS, vy, hvy); sync()
-                                     continue
-                                 elif code == e.BTN_DPAD_RIGHT:
-                                     axis_state[EV_ABS_HAT0X] = 1 if pressed else axis_state.get(EV_ABS_HAT0X, 0)
-                                     if not pressed and axis_state.get(EV_ABS_HAT0Y, 0) != 0:
-                                         pass
-                                     elif not pressed:
-                                         axis_state[EV_ABS_HAT0X] = 0
-                                     hvx = axis_state.get(EV_ABS_HAT0X, 0)
-                                     hvy = axis_state.get(EV_ABS_HAT0Y, 0)
-                                     vx = abs_map.get(EV_ABS_HAT0X)
-                                     vy = abs_map.get(EV_ABS_HAT0Y)
-                                     if vx is not None: write_event(EV_ABS, vx, hvx); sync()
-                                     if vy is not None: write_event(EV_ABS, vy, hvy); sync()
-                                     continue
-                                 # Map DS4 KEY_W (up) and KEY_Q (left) to D-pad
-                                 if code == e.KEY_W:  # Up
-                                     write_event(EV_KEY, e.BTN_DPAD_UP, 1 if pressed else 0); sync()
-                                     continue
-                                 elif code == e.KEY_Q:  # Left
-                                     write_event(EV_KEY, e.BTN_DPAD_LEFT, 1 if pressed else 0); sync()
-                                     continue
-                                 elif code == e.KEY_S:  # Down
-                                     write_event(EV_KEY, e.BTN_DPAD_DOWN, 1 if pressed else 0); sync()
-                                     continue
-                                 elif code == e.KEY_E:  # Right
-                                     write_event(EV_KEY, e.BTN_DPAD_RIGHT, 1 if pressed else 0); sync()
-                                     continue
-                                 if code not in btn_map:
-                                     continue
-                                 prev_state = btn_state.get(code)
-                                 if prev_state == pressed:
-                                     continue
-                                 btn_state[code] = pressed
-                                 vcode = btn_map[code]
-                                 write_event(EV_KEY, vcode, 1 if pressed else 0)
-                                 sync()
+                                code = event.code
+                                pressed = event.value == 1
+
+                                # D-pad: converter BTN_DPAD_* → eixos HAT ABS
+                                if code == e.BTN_DPAD_UP:
+                                    if pressed:
+                                        axis_state[EV_ABS_HAT0Y] = -1
+                                    elif axis_state.get(EV_ABS_HAT0Y, 0) == -1 and axis_state.get(EV_ABS_HAT0X, 0) == 0:
+                                        axis_state[EV_ABS_HAT0Y] = 0
+                                    hvx = axis_state.get(EV_ABS_HAT0X, 0)
+                                    hvy = axis_state.get(EV_ABS_HAT0Y, 0)
+                                    vx = abs_map.get(EV_ABS_HAT0X)
+                                    vy = abs_map.get(EV_ABS_HAT0Y)
+                                    if vx is not None: write_event(EV_ABS, vx, hvx); sync()
+                                    if vy is not None: write_event(EV_ABS, vy, hvy); sync()
+                                    continue
+                                elif code == e.BTN_DPAD_DOWN:
+                                    if pressed:
+                                        axis_state[EV_ABS_HAT0Y] = 1
+                                    elif axis_state.get(EV_ABS_HAT0Y, 0) == 1 and axis_state.get(EV_ABS_HAT0X, 0) == 0:
+                                        axis_state[EV_ABS_HAT0Y] = 0
+                                    hvx = axis_state.get(EV_ABS_HAT0X, 0)
+                                    hvy = axis_state.get(EV_ABS_HAT0Y, 0)
+                                    vx = abs_map.get(EV_ABS_HAT0X)
+                                    vy = abs_map.get(EV_ABS_HAT0Y)
+                                    if vx is not None: write_event(EV_ABS, vx, hvx); sync()
+                                    if vy is not None: write_event(EV_ABS, vy, hvy); sync()
+                                    continue
+                                elif code == e.BTN_DPAD_LEFT:
+                                    if pressed:
+                                        axis_state[EV_ABS_HAT0X] = -1
+                                    elif axis_state.get(EV_ABS_HAT0X, 0) == -1 and axis_state.get(EV_ABS_HAT0Y, 0) == 0:
+                                        axis_state[EV_ABS_HAT0X] = 0
+                                    hvx = axis_state.get(EV_ABS_HAT0X, 0)
+                                    hvy = axis_state.get(EV_ABS_HAT0Y, 0)
+                                    vx = abs_map.get(EV_ABS_HAT0X)
+                                    vy = abs_map.get(EV_ABS_HAT0Y)
+                                    if vx is not None: write_event(EV_ABS, vx, hvx); sync()
+                                    if vy is not None: write_event(EV_ABS, vy, hvy); sync()
+                                    continue
+                                elif code == e.BTN_DPAD_RIGHT:
+                                    if pressed:
+                                        axis_state[EV_ABS_HAT0X] = 1
+                                    elif axis_state.get(EV_ABS_HAT0X, 0) == 1 and axis_state.get(EV_ABS_HAT0Y, 0) == 0:
+                                        axis_state[EV_ABS_HAT0X] = 0
+                                    hvx = axis_state.get(EV_ABS_HAT0X, 0)
+                                    hvy = axis_state.get(EV_ABS_HAT0Y, 0)
+                                    vx = abs_map.get(EV_ABS_HAT0X)
+                                    vy = abs_map.get(EV_ABS_HAT0Y)
+                                    if vx is not None: write_event(EV_ABS, vx, hvx); sync()
+                                    if vy is not None: write_event(EV_ABS, vy, hvy); sync()
+                                    continue
+
+                                # Keyboard overrides (W/Q/S/E)
+                                if code == e.KEY_W:
+                                    axis_state[EV_ABS_HAT0Y] = -1
+                                    hvx = axis_state.get(EV_ABS_HAT0X, 0)
+                                    hvy = axis_state.get(EV_ABS_HAT0Y, 0)
+                                    vx = abs_map.get(EV_ABS_HAT0X)
+                                    vy = abs_map.get(EV_ABS_HAT0Y)
+                                    if vx is not None: write_event(EV_ABS, vx, hvx); sync()
+                                    if vy is not None: write_event(EV_ABS, vy, hvy); sync()
+                                    continue
+                                elif code == e.KEY_Q:
+                                    axis_state[EV_ABS_HAT0X] = -1
+                                    hvx = axis_state.get(EV_ABS_HAT0X, 0)
+                                    hvy = axis_state.get(EV_ABS_HAT0Y, 0)
+                                    vx = abs_map.get(EV_ABS_HAT0X)
+                                    vy = abs_map.get(EV_ABS_HAT0Y)
+                                    if vx is not None: write_event(EV_ABS, vx, hvx); sync()
+                                    if vy is not None: write_event(EV_ABS, vy, hvy); sync()
+                                    continue
+                                elif code == e.KEY_S:
+                                    axis_state[EV_ABS_HAT0Y] = 1
+                                    hvx = axis_state.get(EV_ABS_HAT0X, 0)
+                                    hvy = axis_state.get(EV_ABS_HAT0Y, 0)
+                                    vx = abs_map.get(EV_ABS_HAT0X)
+                                    vy = abs_map.get(EV_ABS_HAT0Y)
+                                    if vx is not None: write_event(EV_ABS, vx, hvx); sync()
+                                    if vy is not None: write_event(EV_ABS, vy, hvy); sync()
+                                    continue
+                                elif code == e.KEY_E:
+                                    axis_state[EV_ABS_HAT0X] = 1
+                                    hvx = axis_state.get(EV_ABS_HAT0X, 0)
+                                    hvy = axis_state.get(EV_ABS_HAT0Y, 0)
+                                    vx = abs_map.get(EV_ABS_HAT0X)
+                                    vy = abs_map.get(EV_ABS_HAT0Y)
+                                    if vx is not None: write_event(EV_ABS, vx, hvx); sync()
+                                    if vy is not None: write_event(EV_ABS, vy, hvy); sync()
+                                    continue
+
+                                if code not in btn_map:
+                                    continue
+                                prev_state = btn_state.get(code)
+                                if prev_state == pressed:
+                                    continue
+                                btn_state[code] = pressed
+                                vcode = btn_map[code]
+                                write_event(EV_KEY, vcode, 1 if pressed else 0)
+                                sync()
 
                             elif event.type == EV_ABS:
                                 code = event.code
                                 if code in (EV_ABS_HAT0X, EV_ABS_HAT0Y):
-                                    # Send BOTH HAT ABS (for Xbox-style games) AND BTN_DPAD keys (for other games)
                                     vcode = abs_map.get(code)
                                     if vcode is not None:
                                         if axis_state.get(code) != event.value:
@@ -275,10 +341,15 @@ class WorkerThread(QThread):
                                         write_event(EV_ABS, result[0], result[1])
                                         sync()
                     except OSError as ex:
-                        logger.warning(f"Worker: evdev read error: {ex}")
+                        print(f"[WORKER] evdev read OSError: {ex}")
                         break
+                    except Exception as ex:
+                        print(f"[WORKER] evdev unexpected error: {type(ex).__name__}: {ex}")
 
-                if hidraw_fd in readable and self._hidraw_reader:
+                # ------------------------------------------------------------------
+                # HIDRAW path
+                # ------------------------------------------------------------------
+                if hidraw_fd in readable and self._hidraw_reader and use_hidraw:
                     try:
                         report = self._hidraw_reader.read_report()
                         if report and len(report) >= 64:
@@ -286,42 +357,57 @@ class WorkerThread(QThread):
                                 report, write_event, sync, btn_state, axis_state,
                                 mapper, last_dpad_x, last_dpad_y, EV_KEY, EV_ABS
                             )
+                        elif report is None and self._hidraw_reader.is_open():
+                            pass  # No data available yet, normal for non-blocking
                     except Exception as ex:
-                        logger.warning(f"Worker: hidraw read error: {ex}")
+                        print(f"[WORKER] hidraw error: {type(ex).__name__}: {ex}")
 
+                # ------------------------------------------------------------------
+                # Rumble forwarding (game → physical)
+                # ------------------------------------------------------------------
                 if current_event_fd in readable and current_event_fd >= 0:
                     try:
-                        import os
-                        data = os.read(current_event_fd, 4096)
+                        import os as _os
+                        data = _os.read(current_event_fd, 4096)
                         if data:
-                            # Parse events from the raw bytes
                             from evdev.eventio import EventReader
-                            # Use the event device path to create an InputDevice
+                            # Re-open event device each time to read pending events
+                            # (The cached fd is for writing; reading uses the event path)
                             event_path = vdev._uinput.device.path if vdev._uinput else None
                             if event_path:
-                                evt_dev = InputDevice(event_path)
-                                for event in evt_dev.read():
-                                    if event.type == EV_FF:
-                                        try:
-                                            if self._device:
-                                                self._device.write(EV_FF, event.code, event.value)
-                                                self._device.syn()
-                                        except OSError:
-                                            pass
-                                evt_dev.close()
+                                try:
+                                    evt_dev = EvdevInputDevice(event_path)
+                                    for event in evt_dev.read():
+                                        if event.type == EV_FF:
+                                            try:
+                                                if self._device:
+                                                    self._device.write(EV_FF, event.code, event.value)
+                                                    self._device.syn()
+                                            except OSError:
+                                                pass
+                                    evt_dev.close()
+                                except Exception as ex:
+                                    print(f"[WORKER] rumble event read error: {ex}")
                     except Exception:
                         pass
 
         except OSError as ex:
-            logger.warning(f"Device read error: {ex}")
+            print(f"[WORKER] Device read OSError: {ex}")
         except Exception as ex:
-            logger.error(f"Unexpected error in worker: {ex}")
+            print(f"[WORKER] Unexpected fatal error: {type(ex).__name__}: {ex}")
+            import traceback
+            traceback.print_exc()
         finally:
+            print("[WORKER] run() finally block — cleaning up")
             self._running = False
             if self._hidraw_reader:
                 self._hidraw_reader.close()
+                self._hidraw_fd = -1
+            vdev.close_event_fd()
             if not self._intentional_stop:
+                print("[WORKER] Emitting device_disconnected")
                 self.device_disconnected.emit()
+            print("[WORKER] run() finished")
 
     def _process_hidraw_report(self, report, write_event, sync, btn_state, axis_state, mapper, last_dpad_x, last_dpad_y, EV_KEY, EV_ABS):
         """Process a HIDRAW report. Returns (new_dpad_x, new_dpad_y)."""
@@ -351,8 +437,6 @@ class WorkerThread(QThread):
         }
 
         dpad_byte = (report[3] >> 4) & 0x0F
-        # DS4 D-pad encoding: 8=neutral, other values are directions
-        # 0=neutral, 2=right, 4=down-left, 6=left, 8=up, A=down-right, C=down, E=up-left
         dpad_map = {
             0: (0, 0), 2: (1, 0), 4: (-1, 1), 6: (-1, 0),
             8: (0, 0), 0xA: (1, 1), 0xC: (0, 1), 0xE: (-1, -1),
@@ -401,6 +485,7 @@ class WorkerThread(QThread):
         return dpad_x, dpad_y
 
     def stop(self, intentional=False):
+        print(f"[WORKER] stop(intentional={intentional})")
         self._intentional_stop = intentional
         self._running = False
         self.wait(2000)

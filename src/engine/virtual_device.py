@@ -3,6 +3,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Dict, List, Optional, Tuple
 import logging
+import os
 
 from evdev import UInput, AbsInfo, ecodes as e
 
@@ -22,13 +23,17 @@ class VirtualDeviceType(Enum):
 
 class VirtualDevice:
     def __init__(self, device_type: VirtualDeviceType = VirtualDeviceType.XBOX, slot_id: int = 0):
+        print(f"[VDEV] __init__ slot={slot_id} type={device_type.value}")
         self.device_type = device_type
         self._slot_id = slot_id
         self._uinput: Optional[UInput] = None
+        self._event_fd: int = -1
+        self._event_fd_cached: bool = False
         self._caps, self._name, self._vendor, self._product, self._version = \
             self._build_capabilities()
 
     def _build_capabilities(self) -> Tuple[Dict[int, list], str, int, int, int]:
+        print(f"[VDEV] _build_capabilities type={self.device_type.value}")
         caps = {
             e.EV_KEY: [],
             e.EV_ABS: [],
@@ -84,10 +89,19 @@ class VirtualDevice:
             name = "Sony Interactive Entertainment Wireless Controller"
             vendor, product, version = 0x054c, 0x09cc, 0x0100
 
+        print(f"[VDEV] _build_capabilities done: name={name} vendor=0x{vendor:04x} product=0x{product:04x}")
         return caps, name, vendor, product, version
 
     def create(self) -> bool:
+        print(f"[VDEV] create() called slot={self._slot_id} active={self.is_active()}")
+        if self.is_active():
+            print(f"[VDEV] create() skipped: already active (fd={self._uinput.fd})")
+            return True
         try:
+            print(f"[VDEV] Calling UInput() constructor...")
+            print(f"[VDEV]   caps EV_KEY count: {len(self._caps[e.EV_KEY])}")
+            print(f"[VDEV]   caps EV_ABS count: {len(self._caps[e.EV_ABS])}")
+            print(f"[VDEV]   caps EV_FF count: {len(self._caps[e.EV_FF])}")
             self._uinput = UInput(
                 self._caps,
                 name=self._name,
@@ -99,19 +113,36 @@ class VirtualDevice:
                 input_props=[INPUT_PROP_GAMEPAD],
                 max_effects=4,
             )
-            logger.info(f"Created virtual device: {self._name} (bustype=USB, phys=ds4linux-uinput-{self._slot_id})")
+            print(f"[VDEV] UInput created successfully! fd={self._uinput.fd}")
+            print(f"[VDEV]   device.path={getattr(self._uinput.device, 'path', 'N/A')}")
+            self._event_fd = -1
+            self._event_fd_cached = False
             return True
-        except Exception as e:
-            logger.error(f"Failed to create virtual device: {e}")
+        except Exception as ex:
+            print(f"[VDEV] FAILED to create UInput: {type(ex).__name__}: {ex}")
+            import traceback
+            traceback.print_exc()
             return False
 
     def destroy(self):
+        print(f"[VDEV] destroy() called active={self.is_active()}")
         if self._uinput:
             try:
+                print(f"[VDEV] Closing UInput fd={self._uinput.fd}")
                 self._uinput.close()
+                print(f"[VDEV] UInput closed")
+            except Exception as ex:
+                print(f"[VDEV] Error closing UInput: {ex}")
+            finally:
+                self._uinput = None
+        if self._event_fd >= 0:
+            try:
+                os.close(self._event_fd)
+                print(f"[VDEV] Closed cached event_fd={self._event_fd}")
             except Exception:
                 pass
-            self._uinput = None
+            self._event_fd = -1
+            self._event_fd_cached = False
 
     def write_event(self, ev_type: int, code: int, value: int):
         if self._uinput:
@@ -144,33 +175,50 @@ class VirtualDevice:
     @property
     def event_fd(self) -> int:
         """Return the event device fd for reading game output events (rumble, etc).
-        The UInput fd is write-only; events from games go to the event device."""
-        if self._uinput and self._uinput.device:
+        The UInput fd is write-only; events from games go to the event device.
+        Cached to prevent file descriptor leak."""
+        if not self._uinput:
+            return -1
+        if self._event_fd_cached and self._event_fd >= 0:
+            return self._event_fd
+        try:
+            event_path = self._uinput.device.path
+            if not event_path:
+                print(f"[VDEV] event_fd: device.path is None")
+                return -1
+            fd = os.open(event_path, os.O_RDWR | os.O_NONBLOCK)
+            print(f"[VDEV] event_fd: opened {event_path} -> fd={fd}")
+            self._event_fd = fd
+            self._event_fd_cached = True
+            return fd
+        except Exception as ex:
+            print(f"[VDEV] event_fd: FAILED to open {event_path}: {ex}")
+            return -1
+
+    def close_event_fd(self):
+        """Close the cached event_fd to prevent leaks."""
+        if self._event_fd >= 0:
             try:
-                event_path = self._uinput.device.path
-                import os
-                return os.open(event_path, os.O_RDWR | os.O_NONBLOCK)
+                os.close(self._event_fd)
+                print(f"[VDEV] event_fd: closed fd={self._event_fd}")
             except Exception:
                 pass
-        return -1
+            self._event_fd = -1
+            self._event_fd_cached = False
 
     def set_device_type(self, device_type: VirtualDeviceType):
         """Update device type without destroying the virtual device."""
         if device_type == self.device_type:
             return
 
-        # Store old device type for logging
         old_type = self.device_type
+        print(f"[VDEV] set_device_type: {old_type.value} -> {device_type.value}")
 
-        # Update type and capabilities
         self.device_type = device_type
         self._caps, self._name, self._vendor, self._product, self._version = \
             self._build_capabilities()
 
-        # If device was active, destroy and recreate with new caps
         if self.is_active():
-            was_active = True
             self.destroy()
-            if was_active:
-                self.create()
-                logger.info(f"Updated virtual device from {old_type.value} to {device_type.value}")
+            self.create()
+            print(f"[VDEV] set_device_type: recreated device as {device_type.value}")

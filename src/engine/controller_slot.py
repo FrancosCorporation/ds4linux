@@ -123,25 +123,40 @@ class ControllerSlot(QObject):
         self.status = SlotStatus.CONNECTING
         try:
             self._device = InputDevice(device_path)
+            print(f"[SLOT{self._slot_id}] Controle Físico Encontrado: {device_path} name={self._device.name}")
         except (OSError, PermissionError) as e:
             logger.error(f"Cannot open {device_path}: {e}")
+            print(f"[SLOT{self._slot_id}] ERRO: Não foi possível abrir {device_path}: {e}")
             self.status = SlotStatus.ERROR
             return False
 
+        # Attempt exclusive grab with proper error handling
         try:
             self._device.grab()
             self._grabbed = True
-            logger.info(f"Grabbed {self._device_path}")
+            print(f"[SLOT{self._slot_id}] Grab exclusivo concedido em {device_path}")
+        except IOError as e:
+            print(f"[SLOT{self._slot_id}] ERRO CRÍTICO: grab() falhou — dispositivo ocupado por outro processo ({e})")
+            print(f"[SLOT{self._slot_id}]   Verifique se Steam Input, ds4drv ou outra instância do ds4linux está rodando")
+            logger.warning(f"grab() failed for {device_path}: {e} - continuing without grab")
+            self._grabbed = False
         except OSError as e:
+            print(f"[SLOT{self._slot_id}] ERRO: grab() falhou com OSError: {e}")
             logger.warning(f"grab() failed for {device_path}: {e} - continuing without grab")
             self._grabbed = False
 
         if not self._virtual_device.is_active():
-            self._virtual_device.create()
+            if self._virtual_device.create():
+                print(f"[SLOT{self._slot_id}] Dispositivo Virtual Criado com sucesso (fd={self._virtual_device.uinput_fd})")
+            else:
+                print(f"[SLOT{self._slot_id}] ERRO: Falha ao criar Dispositivo Virtual!")
+                self.status = SlotStatus.ERROR
+                return False
 
         self._device_path = device_path
         self.status = SlotStatus.CONNECTED
         self._battery_level = self._read_battery()
+        print(f"[SLOT{self._slot_id}] Status: CONNECTED — worker será iniciado")
 
         # Discover LED path from sysfs
         led_path = LEDController.find_ds4_led(device_path)
@@ -177,15 +192,17 @@ class ControllerSlot(QObject):
             except OSError:
                 pass
             self._grabbed = False
+            print(f"[SLOT{self._slot_id}] Dispositivo físico desanexado e ungrab")
 
         was_connected = self.is_connected
         self._device = None
         self._device_path = None
         self.status = SlotStatus.DISCONNECTED
 
-        # Destroy virtual device to release event device
+        # Destroy virtual device to release event device and close cached fds
         if self._virtual_device.is_active():
             self._virtual_device.destroy()
+            print(f"[SLOT{self._slot_id}] Dispositivo Virtual destruído")
 
         if was_connected:
             self.device_disconnected.emit()
@@ -209,14 +226,20 @@ class ControllerSlot(QObject):
 
     def start_worker(self):
         if self.is_connected and self._input_mapper and not self._worker.isRunning():
+            print(f"[SLOT{self._slot_id}] Iniciando Loop de Leitura do Worker...")
             self._worker.set_device(self._device)
             self._worker.set_device_grabbed(self._grabbed)
             self._worker.start()
+            print(f"[SLOT{self._slot_id}] Worker started (thread={self._worker.thread()})")
+        elif self._worker.isRunning():
+            print(f"[SLOT{self._slot_id}] Worker já está rodando, não iniciando novamente")
 
     def stop_worker(self):
         if self._worker.isRunning():
+            print(f"[SLOT{self._slot_id}] Parando Worker...")
             self._worker.stop()
             self._worker.wait(2000)
+            print(f"[SLOT{self._slot_id}] Worker parado")
 
     def _read_battery(self) -> int:
         if not self._device:
