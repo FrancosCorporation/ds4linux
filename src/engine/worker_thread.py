@@ -123,6 +123,7 @@ class WorkerThread(QThread):
 
         phys_fd = self._device.fd if (self._device and not use_hidraw) else -1
         virt_fd = vdev.uinput_fd
+        event_fd = vdev.event_fd
         hidraw_fd = self._hidraw_reader._fd if self._hidraw_reader else -1
 
         last_dpad_x = 0
@@ -136,6 +137,9 @@ class WorkerThread(QThread):
                 current_virt_fd = vdev.uinput_fd
                 if current_virt_fd >= 0:
                     fds.append(current_virt_fd)
+                current_event_fd = vdev.event_fd
+                if current_event_fd >= 0:
+                    fds.append(current_event_fd)
                 if hidraw_fd >= 0:
                     fds.append(hidraw_fd)
 
@@ -285,16 +289,27 @@ class WorkerThread(QThread):
                     except Exception as ex:
                         logger.warning(f"Worker: hidraw read error: {ex}")
 
-                if current_virt_fd in readable and self._device:
+                if current_event_fd in readable and current_event_fd >= 0:
                     try:
-                        for event in vdev._uinput.read():
-                            if event.type == EV_FF:
-                                try:
-                                    self._device.write(EV_FF, event.code, event.value)
-                                    self._device.syn()
-                                except OSError:
-                                    pass
-                    except OSError:
+                        import os
+                        data = os.read(current_event_fd, 4096)
+                        if data:
+                            # Parse events from the raw bytes
+                            from evdev.eventio import EventReader
+                            # Use the event device path to create an InputDevice
+                            event_path = vdev._uinput.device.path if vdev._uinput else None
+                            if event_path:
+                                evt_dev = InputDevice(event_path)
+                                for event in evt_dev.read():
+                                    if event.type == EV_FF:
+                                        try:
+                                            if self._device:
+                                                self._device.write(EV_FF, event.code, event.value)
+                                                self._device.syn()
+                                        except OSError:
+                                            pass
+                                evt_dev.close()
+                    except Exception:
                         pass
 
         except OSError as ex:

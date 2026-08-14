@@ -141,6 +141,19 @@ class VirtualDevice:
             return self._uinput.fd
         return -1
 
+    @property
+    def event_fd(self) -> int:
+        """Return the event device fd for reading game output events (rumble, etc).
+        The UInput fd is write-only; events from games go to the event device."""
+        if self._uinput and self._uinput.device:
+            try:
+                event_path = self._uinput.device.path
+                import os
+                return os.open(event_path, os.O_RDWR | os.O_NONBLOCK)
+            except Exception:
+                pass
+        return -1
+
     def set_device_type(self, device_type: VirtualDeviceType):
         """Update device type without destroying the virtual device."""
         if device_type == self.device_type:
