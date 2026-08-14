@@ -70,10 +70,9 @@ class WorkerThread(QThread):
 
     def run(self):
         use_hidraw = True
-        if self._device is not None and self._device_grabbed:
-            # Try evdev first (lower latency), fall back to HIDRAW if grab fails
-            logger.info(f"Worker: evdev grab succeeded, trying evdev mode")
-            use_hidraw = False
+        # Always use HIDRAW for reliable D-pad input
+        if self._device is not None and not self._device_grabbed:
+            logger.info("Worker: evdev grabbed by another process, using HIDRAW")
 
         if not self._device or use_hidraw or not self._device_grabbed:
             hidraw_path = find_ds4_hidraw()
@@ -219,6 +218,19 @@ class WorkerThread(QThread):
                                      if vx is not None: write_event(EV_ABS, vx, hvx); sync()
                                      if vy is not None: write_event(EV_ABS, vy, hvy); sync()
                                      continue
+                                 # Map DS4 KEY_W (up) and KEY_Q (left) to D-pad
+                                 if code == e.KEY_W:  # Up
+                                     write_event(EV_KEY, e.BTN_DPAD_UP, 1 if pressed else 0); sync()
+                                     continue
+                                 elif code == e.KEY_Q:  # Left
+                                     write_event(EV_KEY, e.BTN_DPAD_LEFT, 1 if pressed else 0); sync()
+                                     continue
+                                 elif code == e.KEY_S:  # Down
+                                     write_event(EV_KEY, e.BTN_DPAD_DOWN, 1 if pressed else 0); sync()
+                                     continue
+                                 elif code == e.KEY_E:  # Right
+                                     write_event(EV_KEY, e.BTN_DPAD_RIGHT, 1 if pressed else 0); sync()
+                                     continue
                                  if code not in btn_map:
                                      continue
                                  prev_state = btn_state.get(code)
@@ -232,14 +244,27 @@ class WorkerThread(QThread):
                             elif event.type == EV_ABS:
                                 code = event.code
                                 if code in (EV_ABS_HAT0X, EV_ABS_HAT0Y):
+                                    # Send BOTH HAT ABS (for Xbox-style games) AND BTN_DPAD keys (for other games)
                                     vcode = abs_map.get(code)
-                                    if vcode is None:
-                                        continue
-                                    if axis_state.get(code) == event.value:
-                                        continue
-                                    axis_state[code] = event.value
-                                    write_event(EV_ABS, vcode, event.value)
-                                    sync()
+                                    if vcode is not None:
+                                        if axis_state.get(code) != event.value:
+                                            axis_state[code] = event.value
+                                            write_event(EV_ABS, vcode, event.value)
+                                            sync()
+                                    if code == EV_ABS_HAT0X:
+                                        if event.value == 1:
+                                            write_event(EV_KEY, e.BTN_DPAD_RIGHT, 1); sync()
+                                            write_event(EV_KEY, e.BTN_DPAD_RIGHT, 0); sync()
+                                        elif event.value == -1:
+                                            write_event(EV_KEY, e.BTN_DPAD_LEFT, 1); sync()
+                                            write_event(EV_KEY, e.BTN_DPAD_LEFT, 0); sync()
+                                    elif code == EV_ABS_HAT0Y:
+                                        if event.value == 1:
+                                            write_event(EV_KEY, e.BTN_DPAD_DOWN, 1); sync()
+                                            write_event(EV_KEY, e.BTN_DPAD_DOWN, 0); sync()
+                                        elif event.value == -1:
+                                            write_event(EV_KEY, e.BTN_DPAD_UP, 1); sync()
+                                            write_event(EV_KEY, e.BTN_DPAD_UP, 0); sync()
                                 else:
                                     result = mapper.map_axis(code, event.value)
                                     if result:

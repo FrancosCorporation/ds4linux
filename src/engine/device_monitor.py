@@ -47,7 +47,6 @@ class DeviceMonitor(QObject):
 
     def _init(self) -> None:
         self._running = True
-        self._scan_existing()
 
         try:
             self._ctx = pyudev.Context()
@@ -57,6 +56,12 @@ class DeviceMonitor(QObject):
             logger.error(f"pyudev error: {e}")
             self._running = False
             return
+
+        # Defer initial scan by 500ms to ensure Qt event loop is running
+        self._init_timer = QTimer(self)
+        self._init_timer.setSingleShot(True)
+        self._init_timer.timeout.connect(self._scan_existing)
+        self._init_timer.start(500)
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._poll_events)

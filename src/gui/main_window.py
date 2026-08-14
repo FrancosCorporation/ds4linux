@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QListWidget, QListWidgetItem, QHeaderView, QAbstractItemView,
     QSplitter
 )
-from PySide6.QtCore import Qt, Signal, Slot, QTimer, QSize
+from PySide6.QtCore import Qt, Signal, Slot, QTimer, QSize, QSettings
 from PySide6.QtGui import QIcon, QPixmap, QColor, QAction, QFont, QPainter
 
 from ..constants import APP_NAME, APP_VERSION, MAX_CONTROLLERS
@@ -173,6 +173,8 @@ class MainWindow(QMainWindow):
         self.resize(1200, 800)
         self.setStyleSheet(get_stylesheet())
 
+        self._restore_geometry()
+
         self._multi_manager = MultiDeviceManager(max_slots=MAX_CONTROLLERS)
         self._auto_profile = AutoProfileManager(
             self._multi_manager._profile_manager
@@ -187,6 +189,49 @@ class MainWindow(QMainWindow):
         self._setup_tray()
         self._setup_ui()
         self._connect_signals()
+
+        # Periodic system health check
+        self._sys_timer = QTimer(self)
+        self._sys_timer.timeout.connect(self._check_system_status)
+        self._sys_timer.start(5000)  # every 5 seconds
+        self._check_system_status()
+
+    def _restore_geometry(self):
+        """Restore window geometry from saved settings."""
+        settings = QSettings("DS4Linux", "DS4Linux")
+        if settings.contains("window/geometry"):
+            self.restoreGeometry(settings.value("window/geometry"))
+            if not self._is_on_visible_screen():
+                self._center_on_primary_screen()
+        elif settings.contains("window/position"):
+            self.move(settings.value("window/position"))
+            if not self._is_on_visible_screen():
+                self._center_on_primary_screen()
+        else:
+            self._center_on_primary_screen()
+
+    def _is_on_visible_screen(self) -> bool:
+        """Return True if any part of the window intersects a visible screen."""
+        from PySide6.QtGui import QGuiApplication
+        geo = self.frameGeometry()
+        for screen in QGuiApplication.screens():
+            if screen.availableGeometry().intersects(geo):
+                return True
+        return False
+
+    def _center_on_primary_screen(self):
+        """Center the window on the primary screen."""
+        from PySide6.QtGui import QGuiApplication
+        screen = QGuiApplication.primaryScreen()
+        if screen:
+            geo = screen.availableGeometry()
+            self.move(geo.center().x() - self.width() // 2,
+                      geo.center().y() - self.height() // 2)
+
+    def _save_geometry(self):
+        """Save current window geometry to settings."""
+        settings = QSettings("DS4Linux", "DS4Linux")
+        settings.setValue("window/geometry", self.saveGeometry())
 
     def _create_app_icon(self) -> QIcon:
         """Create the application window icon."""
@@ -253,6 +298,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         """Properly clean up all devices before closing."""
+        self._save_geometry()
         self._auto_profile.stop()
         self._multi_manager.cleanup()
         # Give threads time to finish
@@ -351,14 +397,29 @@ class MainWindow(QMainWindow):
         udev_group = QGroupBox("System Integration")
         udev_layout = QVBoxLayout(udev_group)
 
-        self._install_udev_btn = QPushButton("Install udev Rules")
+        self._install_udev_btn = QPushButton("Reconfigurar Sistema (sudo)")
         self._install_udev_btn.setObjectName("primaryButton")
-        self._install_udev_btn.clicked.connect(self._install_udev_rules)
+        self._install_udev_btn.clicked.connect(self._run_system_setup)
         udev_layout.addWidget(self._install_udev_btn)
 
-        self._udev_status = QLabel("Checking...")
+        self._udev_status = QLabel("Verificando...")
         self._udev_status.setStyleSheet("color: #a0a0b0;")
         udev_layout.addWidget(self._udev_status)
+
+        self._sys_log = QTextEdit()
+        self._sys_log.setReadOnly(True)
+        self._sys_log.setMaximumHeight(100)
+        self._sys_log.setStyleSheet("""
+            QTextEdit {
+                background: #1a1a2e;
+                border: 1px solid #3a3a5c;
+                border-radius: 6px;
+                color: #a0a0b0;
+                font-family: monospace;
+                font-size: 11px;
+            }
+        """)
+        udev_layout.addWidget(self._sys_log)
 
         layout.addWidget(udev_group)
 
@@ -497,12 +558,51 @@ class MainWindow(QMainWindow):
             self._log_text.verticalScrollBar().maximum()
         )
 
+    def _check_system_status(self):
+        """Update system status display periodically."""
+        from ..engine.system_checker import is_module_loaded, is_udev_rules_installed, scan_ds4_devices
+        parts = []
+        if is_module_loaded():
+            parts.append("✅ Driver")
+        else:
+            parts.append("❌ Driver")
+        if is_udev_rules_installed():
+            parts.append("✅ udev")
+        else:
+            parts.append("⚠️ udev")
+        devices = scan_ds4_devices()
+        if devices:
+            parts.append(f"🎮 {len(devices)} controle(s)")
+        else:
+            parts.append("⚠️ Sem controle")
+        if hasattr(self, '_status_label'):
+            self._status_label.setText(" | ".join(parts))
+
     def _stop_all_controllers(self):
         self._multi_manager.disconnect_all()
         self._controllers_table.refresh()
         self._on_log_message("All controllers stopped")
 
     @Slot()
+    def _run_system_setup(self):
+        """Run system setup using stored sudo password."""
+        from ..engine.system_checker import ensure_system_ready, _get_stored_password
+        import threading
+
+        self._install_udev_btn.setEnabled(False)
+        self._sys_log.setText("Executando configuração do sistema...\n")
+
+        def _run():
+            ok, msgs = ensure_system_ready(password=_get_stored_password())
+            lines = "\n".join(f"  {m}" for m in msgs)
+            color = "#6bff6b" if ok else "#ff6b6b"
+            self._udev_status.setText("✅ Sistema pronto" if ok else "❌ Falha na configuração")
+            self._udev_status.setStyleSheet(f"color: {color}; font-weight: bold;")
+            self._sys_log.append(lines)
+            self._install_udev_btn.setEnabled(True)
+
+        threading.Thread(target=_run, daemon=True).start()
+
     def _install_udev_rules(self):
         import subprocess
         try:
