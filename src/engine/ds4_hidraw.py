@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import select
 import struct
 import logging
 from typing import Optional, List, Tuple
@@ -12,19 +13,19 @@ logger = logging.getLogger(__name__)
 class DS4HIDRAWReader:
     """
     Reads DS4 input reports directly from hidraw device.
-    
+
     This bypasses the evdev grab issue by reading raw HID reports.
     The DS4 sends 64-byte reports on the interrupt endpoint.
     """
-    
+
     # DS4 report IDs
     REPORT_ID_INPUT = 0x01
     REPORT_ID_OUTPUT = 0x11
-    
+
     def __init__(self, hidraw_path: str):
         self._hidraw_path = hidraw_path
         self._fd = -1
-    
+
     def open(self) -> bool:
         """Open the hidraw device."""
         try:
@@ -34,7 +35,7 @@ class DS4HIDRAWReader:
         except Exception as e:
             logger.error(f"DS4HIDRAWReader: Failed to open {self._hidraw_path}: {e}")
             return False
-    
+
     def close(self):
         """Close the hidraw device."""
         if self._fd >= 0:
@@ -43,16 +44,21 @@ class DS4HIDRAWReader:
             except Exception:
                 pass
             self._fd = -1
-    
+
     def is_open(self) -> bool:
         return self._fd >= 0
-    
+
     def read_report(self) -> Optional[bytes]:
-        """Read a single 64-byte input report."""
+        """Read a single 64-byte input report using select() to wait for data."""
         if self._fd < 0:
             return None
-        
+
         try:
+            # Wait for data to be available
+            readable, _, _ = select.select([self._fd], [], [], 0.05)
+            if not readable:
+                return None
+
             data = os.read(self._fd, 64)
             if len(data) == 64:
                 return data
