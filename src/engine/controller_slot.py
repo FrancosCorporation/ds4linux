@@ -183,6 +183,10 @@ class ControllerSlot(QObject):
         self._device_path = None
         self.status = SlotStatus.DISCONNECTED
 
+        # Destroy virtual device to release event device
+        if self._virtual_device.is_active():
+            self._virtual_device.destroy()
+
         if was_connected:
             self.device_disconnected.emit()
             self.log_message.emit(f"Slot {self._slot_id}: DS4 disconnected")
