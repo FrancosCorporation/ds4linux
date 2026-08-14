@@ -214,6 +214,17 @@ class WorkerThread(QThread):
                                 code = event.code
                                 pressed = event.value == 1
 
+                                # ============ BUMPERS (LB/RB) - explicit handling ============
+                                # DS4 physical L1=BTN_TL(310), R1=BTN_TR(311) map 1:1 to Xbox LB/RB
+                                if code == e.BTN_TL:  # 310 - L1 / LB
+                                    write_event(EV_KEY, e.BTN_TL, 1 if pressed else 0)
+                                    sync()
+                                    continue
+                                elif code == e.BTN_TR:  # 311 - R1 / RB
+                                    write_event(EV_KEY, e.BTN_TR, 1 if pressed else 0)
+                                    sync()
+                                    continue
+
                                 # D-pad: converter BTN_DPAD_* → eixos HAT ABS
                                 if code == e.BTN_DPAD_UP:
                                     if pressed:
@@ -302,7 +313,10 @@ class WorkerThread(QThread):
                                     if vy is not None: write_event(EV_ABS, vy, hvy); sync()
                                     continue
 
+                                # General button mapping via profile
                                 if code not in btn_map:
+                                    # DEBUG: log orphan key events
+                                    print(f"[DEBUG] Evento ignorado ou não mapeado: Tipo EV_KEY({EV_KEY}), Código {code}, Valor {event.value}")
                                     continue
                                 prev_state = btn_state.get(code)
                                 if prev_state == pressed:
@@ -314,6 +328,8 @@ class WorkerThread(QThread):
 
                             elif event.type == EV_ABS:
                                 code = event.code
+                                # ============ D-PAD HAT SWITCH - forward ABS_HAT0X/Y directly ============
+                                # DS4 sends ABS_HAT0X(16) and ABS_HAT0Y(17) with values -1,0,1
                                 if code in (EV_ABS_HAT0X, EV_ABS_HAT0Y):
                                     vcode = abs_map.get(code)
                                     if vcode is not None:
@@ -321,25 +337,16 @@ class WorkerThread(QThread):
                                             axis_state[code] = event.value
                                             write_event(EV_ABS, vcode, event.value)
                                             sync()
-                                    if code == EV_ABS_HAT0X:
-                                        if event.value == 1:
-                                            write_event(EV_KEY, e.BTN_DPAD_RIGHT, 1); sync()
-                                            write_event(EV_KEY, e.BTN_DPAD_RIGHT, 0); sync()
-                                        elif event.value == -1:
-                                            write_event(EV_KEY, e.BTN_DPAD_LEFT, 1); sync()
-                                            write_event(EV_KEY, e.BTN_DPAD_LEFT, 0); sync()
-                                    elif code == EV_ABS_HAT0Y:
-                                        if event.value == 1:
-                                            write_event(EV_KEY, e.BTN_DPAD_DOWN, 1); sync()
-                                            write_event(EV_KEY, e.BTN_DPAD_DOWN, 0); sync()
-                                        elif event.value == -1:
-                                            write_event(EV_KEY, e.BTN_DPAD_UP, 1); sync()
-                                            write_event(EV_KEY, e.BTN_DPAD_UP, 0); sync()
+                                    # DO NOT emit BTN_DPAD_* clicks - xpad driver uses HAT axes
+                                    continue
                                 else:
                                     result = mapper.map_axis(code, event.value)
                                     if result:
                                         write_event(EV_ABS, result[0], result[1])
                                         sync()
+                                    else:
+                                        # DEBUG: log orphan axis events
+                                        print(f"[DEBUG] Evento ignorado ou não mapeado: Tipo EV_ABS({EV_ABS}), Código {code}, Valor {event.value}")
                     except OSError as ex:
                         print(f"[WORKER] evdev read OSError: {ex}")
                         break
