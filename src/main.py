@@ -137,6 +137,11 @@ def main():
     checker.set_window(window)
     window.show()
 
+    # Initial device scan — called directly after show() to avoid
+    # race conditions with QTimer across threads
+    from .engine.multi_device_manager import MultiDeviceManager
+    MultiDeviceManager.scan_and_assign(window._multi_manager)
+
     return app.exec()
 
 

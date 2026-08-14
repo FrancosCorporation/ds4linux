@@ -19,7 +19,7 @@ class MultiDeviceManager(QObject):
     """
     Manages multiple ControllerSlots, dynamically assigning devices
     detected by DeviceMonitor.
-    
+
     Emits signals so the GUI can update dynamically without fixed slot assumptions.
     """
 
@@ -46,6 +46,19 @@ class MultiDeviceManager(QObject):
         self._monitor.device_removed.connect(self._on_device_removed)
         self._monitor.scan_finished.connect(self._on_scan_finished)
         self._monitor.start()
+
+    @staticmethod
+    def scan_and_assign(mgr: "MultiDeviceManager") -> None:
+        """Static method to scan for devices and assign them.
+        Called from main thread after Qt event loop starts."""
+        import evdev
+        paths = []
+        for p in evdev.list_devices():
+            dm = DeviceMonitor()
+            if dm._is_real_ds4(p):
+                paths.append(p)
+        if paths:
+            mgr._on_scan_finished(paths)
 
     def _on_scan_finished(self, paths: list):
         """Handle initial scan or periodic rescan."""

@@ -57,12 +57,6 @@ class DeviceMonitor(QObject):
             self._running = False
             return
 
-        # Defer initial scan by 500ms to ensure Qt event loop is running
-        self._init_timer = QTimer(self)
-        self._init_timer.setSingleShot(True)
-        self._init_timer.timeout.connect(self._scan_existing)
-        self._init_timer.start(500)
-
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._poll_events)
         self._timer.start(500)
