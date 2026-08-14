@@ -336,11 +336,11 @@ class WorkerThread(QThread):
         }
 
         dpad_byte = (report[3] >> 4) & 0x0F
+        # DS4 D-pad encoding: 8=neutral, other values are directions
+        # 0=neutral, 2=right, 4=down-left, 6=left, 8=up, A=down-right, C=down, E=up-left
         dpad_map = {
-            0: (0, 0), 3: (0, 1), 6: (-1, 0), 8: (0, -1), 11: (1, 0),
-            1: (1, 1), 2: (1, 1), 4: (-1, 1), 5: (-1, 1), 7: (-1, -1),
-            9: (1, -1), 10: (1, -1), 12: (-1, -1), 13: (-1, -1),
-            14: (-1, 0), 15: (1, 1),
+            0: (0, 0), 2: (1, 0), 4: (-1, 1), 6: (-1, 0),
+            8: (0, 0), 0xA: (1, 1), 0xC: (0, 1), 0xE: (-1, -1),
         }
         dpad_x, dpad_y = dpad_map.get(dpad_byte, (0, 0))
 
