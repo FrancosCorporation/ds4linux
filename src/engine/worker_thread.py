@@ -331,11 +331,19 @@ class WorkerThread(QThread):
                                 # ============ D-PAD HAT SWITCH - forward ABS_HAT0X/Y directly ============
                                 # DS4 sends ABS_HAT0X(16) and ABS_HAT0Y(17) with values -1,0,1
                                 if code in (EV_ABS_HAT0X, EV_ABS_HAT0Y):
+                                    print(f"[DEBUG D-PAD] Eixo: {code}, Valor Bruto: {event.value}")
+                                    # Normalize to -1/0/1 for virtual Xbox HAT switch
+                                    if event.value < 0:
+                                        norm = -1
+                                    elif event.value > 0:
+                                        norm = 1
+                                    else:
+                                        norm = 0
                                     vcode = abs_map.get(code)
                                     if vcode is not None:
-                                        if axis_state.get(code) != event.value:
-                                            axis_state[code] = event.value
-                                            write_event(EV_ABS, vcode, event.value)
+                                        if axis_state.get(code) != norm:
+                                            axis_state[code] = norm
+                                            write_event(EV_ABS, vcode, norm)
                                             sync()
                                     # DO NOT emit BTN_DPAD_* clicks - xpad driver uses HAT axes
                                     continue
