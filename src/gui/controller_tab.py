@@ -37,8 +37,37 @@ class ProfileEditorWindow(QWidget):
     - READINGS tab: Live axis/buttons visualization
     """
 
+    # Friendly name mapping: evdev code name -> user visible label
+    _FRIENDLY = {
+        "ABS_HAT0X": "Eixo D‑Pad X",
+        "ABS_HAT0Y": "Eixo D‑Pad Y",
+        "BTN_SOUTH": "✕  /  A",
+        "BTN_EAST": "◯  /  B",
+        "BTN_NORTH": "△  /  Y",
+        "BTN_WEST": "□  /  X",
+        "BTN_TL": "L1  /  LB",
+        "BTN_TR": "R1  /  RB",
+        "BTN_Z": "L2  /  LT",
+        "BTN_TX": "R2  /  RT",
+        "BTN_SELECT": "Share / Back",
+        "BTN_START": "Options / Start",
+        "BTN_MODE": "PS / Guide",
+        "BTN_THUMBL": "L3",
+        "BTN_THUMBR": "R3",
+        "BTN_DPAD_UP": "Seta ↑",
+        "BTN_DPAD_DOWN": "Seta ↓",
+        "BTN_DPAD_LEFT": "Seta ←",
+        "BTN_DPAD_RIGHT": "Seta →",
+    }
+
     save_requested = Signal()
     profile_saved = Signal(str)
+
+    def _friendly(self, code: int) -> str:
+        """Return user‑friendly label for an evdev code; fallback to hex."""
+        from evdev import ecodes as e
+        name = e.KEY.get(code) or e.BTN.get(code) or e.ABS.get(code) or f"0x{code:03X}"
+        return self._FRIENDLY.get(name, name)
 
     def __init__(self, slot_id: int, slot, profile_manager, parent=None):
         super().__init__(parent)

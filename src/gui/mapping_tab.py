@@ -312,7 +312,7 @@ class ListenDialog(QDialog):
         self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
         self.setMinimumSize(280, 120)
         self._setup_ui()
-        self._listening = False
+        self._listening = True          # start listening immediately
         self._captured_code: Optional[int] = None
         self._captured_value: int = 0
 
@@ -385,15 +385,20 @@ class ListenDialog(QDialog):
 
     def capture_event(self, event_type: int, code: int, value: int):
         """Called by parent when a raw event is received."""
-        if not self._listening:
+        # Accept button press (EV_KEY value 1) or hat movement (EV_ABS non‑zero)
+        from evdev import ecodes as e
+
+        accept = False
+        if event_type == e.EV_KEY and value == 1:
+            accept = True
+        elif event_type == e.EV_ABS and code in (e.ABS_HAT0X, e.ABS_HAT0Y) and value != 0:
+            accept = True
+
+        if not accept:
             return
+
         self._timeout_timer.stop()
         self._pulse_timer.stop()
-
-        # Filter: only accept KEY events (buttons), not ABS (sticks)
-        from evdev import ecodes as e
-        if event_type != e.EV_KEY:
-            return
 
         self._captured_code = code
         self._captured_value = value
