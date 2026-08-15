@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QHeaderView, QAbstractItemView, QListWidget, QListWidgetItem,
     QGridLayout, QLineEdit, QRadioButton, QTabWidget, QFrame,
     QScrollArea, QStyle, QMessageBox, QButtonGroup, QProgressBar,
-    QSpacerItem, QSizePolicy
+    QSpacerItem, QSizePolicy, QMenu
 )
 from PySide6.QtCore import Qt, Signal, Slot, QSize, QRectF
 from PySide6.QtGui import QColor, QIcon, QPixmap, QPainter, QBrush, QPen, QFont
@@ -149,44 +149,7 @@ class ProfileEditorWindow(QWidget):
         # ==================== PAINEL CENTRAL: Mapeamento ====================
         center_panel = QVBoxLayout()
         center_panel.setSpacing(8)
-
-        center_header = QHBoxLayout()
-        center_header.addWidget(QLabel("Button Mappings"))
-        center_header.addStretch()
-
-        self.clear_mappings_btn = QPushButton("Clear All")
-        self.clear_mappings_btn.clicked.connect(self._clear_mappings)
-        center_header.addWidget(self.clear_mappings_btn)
-
-        center_panel.addLayout(center_header)
-
-        self.mapping_list = QListWidget()
-        self.mapping_list.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.mapping_list.itemDoubleClicked.connect(self._on_mapping_double_click)
-        self.mapping_list.setStyleSheet("""
-            QListWidget {
-                background: #1e1e2e;
-                border: 1px solid #3a3a5c;
-                border-radius: 6px;
-                font-size: 12px;
-            }
-            QListWidget::item {
-                padding: 6px 10px;
-                border-radius: 4px;
-            }
-            QListWidget::item:selected {
-                background: #00d4aa;
-                color: #1e1e2e;
-            }
-        """)
-        center_panel.addWidget(self.mapping_list)
-
-        # Quick map button
-        self.quick_map_btn = QPushButton("⚡ Quick Map Remaining")
-        self.quick_map_btn.setObjectName("primaryButton")
-        self.quick_map_btn.clicked.connect(self._start_quick_map)
-        center_panel.addWidget(self.quick_map_btn)
-
+        self._create_mapping_list(center_panel)
         controls_layout.addLayout(center_panel, 1)
 
         # ==================== PAINEL DIREITO: Configurações Rápidas ====================
@@ -319,6 +282,47 @@ class ProfileEditorWindow(QWidget):
         controls_layout.addWidget(right_scroll, 1)
 
         self.main_tabs.addTab(controls_widget, "Controls")
+
+    # ------------------------------------------------------------------
+    def _create_mapping_list(self, parent_layout: QVBoxLayout):
+        """Build the mapping list with friendly names, context menu, and listen mode."""
+        # Header with Clear All and Remove Selected
+        hdr = QHBoxLayout()
+        hdr.addWidget(QLabel("Button Mappings"))
+        hdr.addStretch()
+        self.clear_mappings_btn = QPushButton("Clear All")
+        self.clear_mappings_btn.setObjectName("dangerButton")
+        self.clear_mappings_btn.clicked.connect(self._clear_mappings)
+        hdr.addWidget(self.clear_mappings_btn)
+
+        self.remove_sel_btn = QPushButton("Remover Selecionado")
+        self.remove_sel_btn.setEnabled(False)
+        self.remove_sel_btn.clicked.connect(self._remove_selected_mapping)
+        hdr.addWidget(self.remove_sel_btn)
+
+        parent_layout.addLayout(hdr)
+
+        # List widget
+        self.mapping_list = QListWidget()
+        self.mapping_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.mapping_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.mapping_list.customContextMenuRequested.connect(self._show_mapping_context_menu)
+        self.mapping_list.itemSelectionChanged.connect(
+            lambda: self.remove_sel_btn.setEnabled(bool(self.mapping_list.selectedItems()))
+        )
+        self.mapping_list.itemDoubleClicked.connect(self._edit_mapping_listen)
+        self.mapping_list.setStyleSheet("""
+            QListWidget { background:#1e1e2e; border:1px solid #3a3a5c; border-radius:6px; font-size:12px; }
+            QListWidget::item { padding:6px 10px; border-radius:4px; }
+            QListWidget::item:selected { background:#00d4aa; color:#1e1e2e; }
+        """)
+        parent_layout.addWidget(self.mapping_list)
+
+        # Quick map button
+        self.quick_map_btn = QPushButton("⚡ Quick Map Remaining")
+        self.quick_map_btn.setObjectName("primaryButton")
+        self.quick_map_btn.clicked.connect(self._start_quick_map)
+        parent_layout.addWidget(self.quick_map_btn)
 
     # ------------------------------------------------------------------
     def _create_readings_tab(self):
@@ -473,6 +477,39 @@ class ProfileEditorWindow(QWidget):
             logger.info(f"Slot {self.slot_id}: Connected raw_event signal to readings")
 
     # ------------------------------------------------------------------
+    # FRIENDLY NAME TRANSLATION
+    # ------------------------------------------------------------------
+    _FRIENDLY_NAME = {
+        # axes / hat
+        "ABS_HAT0X": "Eixo D‑Pad X",
+        "ABS_HAT0Y": "Eixo D‑Pad Y",
+        # buttons (evdev names)
+        "BTN_SOUTH":   "✕  /  A",
+        "BTN_EAST":    "◯  /  B",
+        "BTN_NORTH":   "△  /  Y",
+        "BTN_WEST":    "□  /  X",
+        "BTN_TL":      "L1  /  LB",
+        "BTN_TR":      "R1  /  RB",
+        "BTN_Z":       "L2  /  LT",
+        "BTN_TX":      "R2  /  RT",
+        "BTN_SELECT":  "Share / Back",
+        "BTN_START":   "Options / Start",
+        "BTN_MODE":    "PS / Guide",
+        "BTN_THUMBL":  "L3",
+        "BTN_THUMBR":  "R3",
+        "BTN_DPAD_UP":    "Seta ↑",
+        "BTN_DPAD_DOWN":  "Seta ↓",
+        "BTN_DPAD_LEFT":  "Seta ←",
+        "BTN_DPAD_RIGHT": "Seta →",
+    }
+
+    def _friendly(self, code: int) -> str:
+        """Return human‑readable name for an evdev code; fallback to hex."""
+        from evdev import ecodes as e
+        name = e.KEY.get(code) or e.BTN.get(code) or e.ABS.get(code) or f"0x{code:03X}"
+        return self._FRIENDLY_NAME.get(name, name)
+
+    # ------------------------------------------------------------------
     # PROFILE LOADING / SAVING
     # ------------------------------------------------------------------
     def _load_current_profile(self):
@@ -584,7 +621,7 @@ class ProfileEditorWindow(QWidget):
     # MAPPING LIST
     # ------------------------------------------------------------------
     def _update_mapping_list(self):
-        """Populate the mapping list from current profile."""
+        """Populate the mapping list from current profile using friendly names."""
         self.mapping_list.clear()
         btn_names = {}
         for enum_cls in (DS4Btn, XboxBtn, PS4Btn):
@@ -593,28 +630,56 @@ class ProfileEditorWindow(QWidget):
 
         mappings = self._current_profile.button_maps if self._current_profile else {}
         for ds4_code, virt_code in sorted(mappings.items()):
-            ds4_name = btn_names.get(ds4_code, f"0x{ds4_code:03X}")
-            virt_name = btn_names.get(virt_code, f"0x{virt_code:03X}")
-            item = QListWidgetItem(f"{ds4_name} → {virt_name}")
-            item.setData(Qt.UserRole, ds4_code)
+            ds4_disp = self._friendly(ds4_code)
+            virt_disp = self._friendly(virt_code)
+            item = QListWidgetItem(f"{ds4_disp}  →  {virt_disp}")
+            item.setData(Qt.UserRole, ds4_code)          # guarda código técnico
             self.mapping_list.addItem(item)
-
-    def _on_mapping_double_click(self, item: QListWidgetItem):
-        """Allow remapping by double-clicking."""
-        ds4_code = item.data(Qt.UserRole)
-        if ds4_code is None:
-            return
-        # Remove old
-        self.mapping_list.takeItem(self.mapping_list.row(item))
-        if self._current_profile and ds4_code in self._current_profile.button_maps:
-            del self._current_profile.button_maps[ds4_code]
-        logger.info(f"Removed mapping for {ds4_code}")
 
     def _clear_mappings(self):
         if self._current_profile:
             self._current_profile.button_maps.clear()
         self._update_mapping_list()
         logger.info("All mappings cleared")
+
+    # ------------------------------------------------------------------
+    # MAPPING LIST INTERACTIONS
+    # ------------------------------------------------------------------
+    def _show_mapping_context_menu(self, pos):
+        item = self.mapping_list.itemAt(pos)
+        if not item:
+            return
+        menu = QMenu(self)
+        del_act = menu.addAction("Excluir Mapeamento")
+        del_act.triggered.connect(lambda: self._delete_mapping_item(item))
+        menu.exec(self.mapping_list.mapToGlobal(pos))
+
+    def _remove_selected_mapping(self):
+        for item in self.mapping_list.selectedItems():
+            self._delete_mapping_item(item)
+
+    def _delete_mapping_item(self, item: QListWidgetItem):
+        ds4_code = item.data(Qt.UserRole)
+        if ds4_code is not None and self._current_profile:
+            self._current_profile.button_maps.pop(ds4_code, None)
+        self.mapping_list.takeItem(self.mapping_list.row(item))
+
+    def _edit_mapping_listen(self, item: QListWidgetItem):
+        ds4_code = item.data(Qt.UserRole)
+        if ds4_code is None:
+            return
+        from .mapping_tab import ListenDialog
+        dlg = ListenDialog(self)
+        dlg.setWindowTitle(f"Mapear: {self._friendly(ds4_code)}")
+        dlg.result.connect(lambda code, val: self._on_listen_result(ds4_code, code, val))
+        dlg.exec()
+
+    def _on_listen_result(self, original_ds4: int, new_code: int, value: int):
+        if value != 1:
+            return
+        if self._current_profile:
+            self._current_profile.button_maps[original_ds4] = new_code
+        self._update_mapping_list()
 
     def _start_quick_map(self):
         """Start quick mapping for unmapped buttons."""
