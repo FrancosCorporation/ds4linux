@@ -293,11 +293,17 @@ class ProfileEditorWindow(QWidget):
         self.clear_mappings_btn = QPushButton("Clear All")
         self.clear_mappings_btn.setObjectName("dangerButton")
         self.clear_mappings_btn.clicked.connect(self._clear_mappings)
+        self.clear_mappings_btn.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
+        self.clear_mappings_btn.setMinimumWidth(110)
+        self.clear_mappings_btn.setStyleSheet("padding: 4px 12px;")
         hdr.addWidget(self.clear_mappings_btn)
 
         self.remove_sel_btn = QPushButton("Remover Selecionado")
         self.remove_sel_btn.setEnabled(False)
         self.remove_sel_btn.clicked.connect(self._remove_selected_mapping)
+        self.remove_sel_btn.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
+        self.remove_sel_btn.setMinimumWidth(150)
+        self.remove_sel_btn.setStyleSheet("padding: 4px 12px;")
         hdr.addWidget(self.remove_sel_btn)
 
         parent_layout.addLayout(hdr)
@@ -322,6 +328,9 @@ class ProfileEditorWindow(QWidget):
         self.quick_map_btn = QPushButton("⚡ Quick Map Remaining")
         self.quick_map_btn.setObjectName("primaryButton")
         self.quick_map_btn.clicked.connect(self._start_quick_map)
+        self.quick_map_btn.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
+        self.quick_map_btn.setMinimumWidth(180)
+        self.quick_map_btn.setStyleSheet("padding: 4px 12px;")
         parent_layout.addWidget(self.quick_map_btn)
 
     # ------------------------------------------------------------------
@@ -669,8 +678,25 @@ class ProfileEditorWindow(QWidget):
         if ds4_code is None:
             return
         from .mapping_tab import ListenDialog
+
         dlg = ListenDialog(self)
         dlg.setWindowTitle(f"Mapear: {self._friendly(ds4_code)}")
+
+        # connect worker raw_event to dialog while it is open
+        worker = getattr(self.slot, "_worker", None)
+        if worker:
+            worker.raw_event.connect(dlg.capture_event)
+
+        def _cleanup():
+            if worker:
+                try:
+                    worker.raw_event.disconnect(dlg.capture_event)
+                except TypeError:
+                    pass
+
+        dlg.accepted.connect(_cleanup)
+        dlg.rejected.connect(_cleanup)
+
         dlg.result.connect(lambda code, val: self._on_listen_result(ds4_code, code, val))
         dlg.exec()
 
