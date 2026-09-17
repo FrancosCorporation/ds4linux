@@ -2,12 +2,114 @@ from __future__ import annotations
 
 import os
 import select
-import struct
 import logging
 from typing import Optional, List, Tuple
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# DS4 input report layout (matches DS4Windows / hid-playstation).
+#
+# USB report (Report ID 0x01, 64 bytes):
+#   [0]  report id (0x01)
+#   [1]  left stick X   (0-255, center 128)
+#   [2]  left stick Y
+#   [3]  right stick X
+#   [4]  right stick Y
+#   [5]  buttons0: bit7=Triangle, bit6=Circle, bit5=Cross, bit4=Square,
+#                  bits0-3 = D-pad (0-7 directions, 8 = neutral)
+#   [6]  buttons1: bit7=R3, bit6=L3, bit5=Options, bit4=Share,
+#                  bit3=R2, bit2=L2, bit1=R1, bit0=L1
+#   [7]  buttons2: bit0=PS, bit1=Touchpad
+#   [8]  L2 trigger (0-255)
+#   [9]  R2 trigger (0-255)
+#
+# Bluetooth full report (Report ID 0x11, 78 bytes) is identical, except it has
+# two reserved bytes after the report id, so the common fields start at [3].
+# ---------------------------------------------------------------------------
+
+DS4_REPORT_ID_USB = 0x01
+DS4_REPORT_ID_BT = 0x11
+
+# D-pad "hat switch" value -> (x, y), using the evdev convention (y = -1 == up)
+DPAD_HAT_MAP = {
+    0: (0, -1),    # Up
+    1: (1, -1),    # Up-Right
+    2: (1, 0),     # Right
+    3: (1, 1),     # Down-Right
+    4: (0, 1),     # Down
+    5: (-1, 1),    # Down-Left
+    6: (-1, 0),    # Left
+    7: (-1, -1),   # Up-Left
+    8: (0, 0),     # Neutral
+}
+
+
+def parse_ds4_report(report: bytes) -> dict:
+    """Parse a raw DS4 HID input report into normalized state.
+
+    Returns a dict with keys: lx, ly, rx, ry, l2, r2, dpad_x, dpad_y,
+    buttons (dict of evdev button code -> bool) and ps/touchpad booleans.
+    """
+    from evdev import ecodes as e
+
+    empty = {
+        'lx': 128, 'ly': 128, 'rx': 128, 'ry': 128,
+        'l2': 0, 'r2': 0,
+        'dpad_x': 0, 'dpad_y': 0,
+        'buttons': {}, 'ps': False, 'touchpad': False,
+    }
+
+    if not report or len(report) < 2:
+        return empty
+
+    report_id = report[0]
+    if report_id == DS4_REPORT_ID_BT and len(report) >= 12:
+        base = 3
+    elif report_id == DS4_REPORT_ID_USB and len(report) >= 10:
+        base = 1
+    else:
+        return empty
+
+    b0 = report[base + 4]
+    b1 = report[base + 5]
+    b2 = report[base + 6]
+
+    dpad = b0 & 0x0F
+    if dpad > 8:
+        dpad = 8
+    dpad_x, dpad_y = DPAD_HAT_MAP[dpad]
+
+    buttons = {
+        e.BTN_WEST:   bool(b0 & 0x10),   # Square
+        e.BTN_SOUTH:  bool(b0 & 0x20),   # Cross
+        e.BTN_EAST:   bool(b0 & 0x40),   # Circle
+        e.BTN_NORTH:  bool(b0 & 0x80),   # Triangle
+        e.BTN_TL:     bool(b1 & 0x01),   # L1
+        e.BTN_TR:     bool(b1 & 0x02),   # R1
+        e.BTN_TL2:    bool(b1 & 0x04),   # L2
+        e.BTN_TR2:    bool(b1 & 0x08),   # R2
+        e.BTN_SELECT: bool(b1 & 0x10),   # Share
+        e.BTN_START:  bool(b1 & 0x20),   # Options
+        e.BTN_THUMBL: bool(b1 & 0x40),   # L3
+        e.BTN_THUMBR: bool(b1 & 0x80),   # R3
+        e.BTN_MODE:   bool(b2 & 0x01),   # PS
+    }
+
+    return {
+        'lx': report[base + 0],
+        'ly': report[base + 1],
+        'rx': report[base + 2],
+        'ry': report[base + 3],
+        'l2': report[base + 7],
+        'r2': report[base + 8],
+        'dpad_x': dpad_x,
+        'dpad_y': dpad_y,
+        'buttons': buttons,
+        'ps': bool(b2 & 0x01),
+        'touchpad': bool(b2 & 0x02),
+    }
 
 
 class DS4HIDRAWReader:
@@ -75,91 +177,25 @@ class DS4HIDRAWReader:
             return None
     
     def parse_buttons(self, report: bytes) -> dict:
-        """Parse button state from input report."""
-        # Byte 0: report ID
-        # Byte 1: buttons (lower 12 bits)
-        # Bit 0: Cross (SOUTH)
-        # Bit 1: Circle (EAST)
-        # Bit 2: Triangle (NORTH)
-        # Bit 3: Square (WEST)
-        # Bit 4: L1 (TL)
-        # Bit 5: R1 (TR)
-        # Bit 6: L2 (TL2) - actually bit 6 is share, bit 7 is options
-        # Bit 7: Options (START)
-        # Bit 8: Share (SELECT)
-        # Bit 9: Options (actually bit 8 is share, bit 9 is options)
-        # Bit 10: L3 (THUMBL)
-        # Bit 11: R3 (THUMBR)
-        # Bit 12: PS (MODE)
-        
-        buttons_byte = report[1]
-        buttons_byte2 = report[2] if len(report) > 2 else 0
-        
-        return {
-            'SOUTH': bool(buttons_byte & 0x01),      # Cross
-            'EAST': bool(buttons_byte & 0x02),        # Circle
-            'NORTH': bool(buttons_byte & 0x04),       # Triangle
-            'WEST': bool(buttons_byte & 0x08),        # Square
-            'TL': bool(buttons_byte & 0x10),          # L1
-            'TR': bool(buttons_byte & 0x20),          # R1
-            'SELECT': bool(buttons_byte & 0x40),      # Share
-            'START': bool(buttons_byte & 0x80),       # Options
-            'THUMBL': bool(buttons_byte2 & 0x01),     # L3
-            'THUMBR': bool(buttons_byte2 & 0x02),     # R3
-            'PS': bool(buttons_byte2 & 0x04),         # PS
-            'TOUCHPAD': bool(buttons_byte2 & 0x08),   # Touchpad
-        }
-    
+        """Parse button state (evdev code -> bool) from an input report."""
+        return parse_ds4_report(report)['buttons']
+
     def parse_sticks(self, report: bytes) -> dict:
-        """Parse stick positions from input report."""
-        # Bytes 2-3: Left Stick X (little-endian, 0-255, center=128)
-        # Bytes 4-5: Left Stick Y
-        # Bytes 6-7: Right Stick X
-        # Bytes 8-9: Right Stick Y
-        # Bytes 10-11: L2 trigger
-        # Bytes 12-13: R2 trigger
-        
-        if len(report) < 14:
-            return {}
-        
+        """Parse stick/trigger positions from an input report."""
+        parsed = parse_ds4_report(report)
         return {
-            'LX': struct.unpack('<H', report[2:4])[0],
-            'LY': struct.unpack('<H', report[4:6])[0],
-            'RX': struct.unpack('<H', report[6:8])[0],
-            'RY': struct.unpack('<H', report[8:10])[0],
-            'L2': struct.unpack('<H', report[10:12])[0],
-            'R2': struct.unpack('<H', report[12:14])[0],
+            'LX': parsed['lx'],
+            'LY': parsed['ly'],
+            'RX': parsed['rx'],
+            'RY': parsed['ry'],
+            'L2': parsed['l2'],
+            'R2': parsed['r2'],
         }
-    
+
     def parse_dpad(self, report: bytes) -> dict:
-        """Parse D-pad state from input report."""
-        # Byte 3 contains D-pad information in the upper nibble
-        if len(report) < 4:
-            return {}
-        
-        dpad_byte = report[3] >> 4  # Upper nibble
-        
-        # D-pad encoding (8 directions + neutral)
-        dpad_map = {
-            0: None,      # Neutral
-            1: ('RIGHT', 'DOWN'),   # Down-Right
-            2: ('DOWN', 'RIGHT'),   # Same as above (different encoding)
-            3: ('DOWN',),           # Down
-            4: ('LEFT', 'DOWN'),    # Down-Left
-            5: ('DOWN', 'LEFT'),    # Same as above
-            6: ('LEFT',),           # Left
-            7: ('UP', 'LEFT'),      # Up-Left
-            8: ('UP',),             # Up
-            9: ('UP', 'RIGHT'),     # Up-Right
-            10: ('RIGHT', 'UP'),    # Same as above
-            11: ('RIGHT',),         # Right
-            12: ('LEFT', 'UP'),     # Up-Left (alternative)
-            13: ('UP', 'LEFT'),     # Same
-            14: ('LEFT',),          # Left (alternative)
-            15: ('LEFT', 'DOWN'),   # Down-Left (alternative)
-        }
-        
-        return dpad_map.get(dpad_byte, (None,))
+        """Parse D-pad state (hat x/y) from an input report."""
+        parsed = parse_ds4_report(report)
+        return {'x': parsed['dpad_x'], 'y': parsed['dpad_y']}
 
 
 def find_ds4_hidraw() -> Optional[str]:

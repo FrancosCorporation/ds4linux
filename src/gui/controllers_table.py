@@ -260,7 +260,10 @@ class ControllersTableWidget(QWidget):
         # Column 8: Edit button
         edit_btn = QPushButton("Editar")
         edit_btn.setFixedWidth(60)
-        edit_btn.clicked.connect(lambda _, sid=slot.slot_id: self.controller_edit.emit(sid))
+        def debug_click(checked, sid=slot.slot_id):
+            print(f"[DEBUG] Botão Editar clicado para slot {sid}")
+            self.controller_edit.emit(sid)
+        edit_btn.clicked.connect(debug_click)
         self.table.setCellWidget(row, 8, edit_btn)
 
     def _set_led_color_cell(self, row: int, slot):

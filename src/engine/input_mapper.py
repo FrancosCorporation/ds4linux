@@ -11,6 +11,7 @@ from ..constants import (
     MAX_AXIS_VALUE, MAX_TRIGGER_VALUE,
 )
 from ..engine.virtual_device import VirtualDeviceType
+from .macro_engine import MacroEngine, MacroAction
 
 
 class Stick(Enum):
@@ -51,6 +52,7 @@ class ProfileConfig:
     name: str = "Default"
     device_type: VirtualDeviceType = VirtualDeviceType.XBOX
     button_maps: Dict[int, int] = field(default_factory=dict)
+    macros: Dict[int, List[MacroAction]] = field(default_factory=dict)
     left_stick: AxisConfig = field(default_factory=AxisConfig)
     right_stick: AxisConfig = field(default_factory=AxisConfig)
     left_trigger: TriggerConfig = field(default_factory=TriggerConfig)
@@ -66,8 +68,9 @@ class ProfileConfig:
 
 
 class InputMapper:
-    def __init__(self, profile: Optional[ProfileConfig] = None):
+    def __init__(self, profile: Optional[ProfileConfig] = None, macro_engine: Optional[MacroEngine] = None):
         self.profile = profile or ProfileConfig()
+        self.macro_engine = macro_engine
         self._axis_state: Dict[int, int] = {}
         self._btn_state: Dict[int, bool] = {}
 
@@ -76,6 +79,11 @@ class InputMapper:
         self.reset_state()
 
     def map_button(self, ds4_code: int, value: int) -> Optional[tuple]:
+        # Macro check
+        if ds4_code in self.profile.macros and self.macro_engine and value == 1:
+            self.macro_engine.execute_macro(self.profile.macros[ds4_code])
+            return None
+
         if ds4_code not in self.profile.button_maps:
             return None
         virtual_code = self.profile.button_maps[ds4_code]
@@ -137,10 +145,21 @@ class InputMapper:
             normalized = 0.0
         else:
             sign = 1 if normalized > 0 else -1
+            # Normaliza para 0.0 - 1.0 (após deadzone)
             adj = (adj - deadzone_val) / (max_val * (1.0 - cfg.deadzone))
+            # Aplica anti-deadzone
             adj = 1.0 - (1.0 - adj) * (1.0 - cfg.anti_deadzone)
-            adj = min(1.0, adj * cfg.max_zone)
-            adj = adj * cfg.sensitivity
+            # Aplica limite de max_zone
+            adj = min(1.0, adj / cfg.max_zone)
+            
+            # Aplica Curvas matematicamente precisas
+            if cfg.output_curve == "Exponential":
+                adj = adj ** 2
+            elif cfg.output_curve == "Quadratic":
+                adj = adj ** 3
+            
+            # Aplica sensibilidade
+            adj = min(1.0, adj * cfg.sensitivity)
             normalized = sign * adj * max_val
 
         if cfg.square_stick and is_stick:

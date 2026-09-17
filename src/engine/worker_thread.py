@@ -9,19 +9,6 @@ from .ds4_hidraw import DS4HIDRAWReader, find_ds4_hidraw
 
 logger = logging.getLogger(__name__)
 
-DS4_BTN_CROSS = 0x01
-DS4_BTN_CIRCLE = 0x02
-DS4_BTN_TRIANGLE = 0x04
-DS4_BTN_SQUARE = 0x08
-DS4_BTN_L1 = 0x10
-DS4_BTN_R1 = 0x20
-DS4_BTN_SHARE = 0x40
-DS4_BTN_OPTIONS = 0x80
-DS4_BTN_L3 = 0x01 << 8
-DS4_BTN_R3 = 0x02 << 8
-DS4_BTN_PS = 0x04 << 8
-DS4_BTN_TOUCHPAD = 0x08 << 8
-
 
 class WorkerThread(QThread):
     device_connected = Signal(object)
@@ -189,7 +176,7 @@ class WorkerThread(QThread):
                     break
 
                 try:
-                    readable, _, _ = select.select(fds, [], [], 0.05)
+                    readable, _, _ = select.select(fds, [], [], 0.001) # Reduzido para 1ms
                 except (ValueError, OSError) as ex:
                     print(f"[WORKER] select() error: {ex}")
                     break
@@ -426,76 +413,49 @@ class WorkerThread(QThread):
 
     def _process_hidraw_report(self, report, write_event, sync, btn_state, axis_state, mapper, last_dpad_x, last_dpad_y, EV_KEY, EV_ABS):
         """Process a HIDRAW report. Returns (new_dpad_x, new_dpad_y)."""
-        from evdev import ecodes as e
         from ..constants import XBOX_ABS_MAP, PS4_ABS_MAP, DS4Abs
         from ..engine.virtual_device import VirtualDeviceType
-
-        _EV_KEY = EV_KEY
-        _EV_ABS = EV_ABS
+        from .ds4_hidraw import parse_ds4_report
 
         profile = mapper.profile
         btn_map = profile.button_maps
         abs_map = XBOX_ABS_MAP if profile.device_type == VirtualDeviceType.XBOX else PS4_ABS_MAP
 
-        buttons = {
-            e.BTN_SOUTH: bool(report[1] & DS4_BTN_CROSS),
-            e.BTN_EAST: bool(report[1] & DS4_BTN_CIRCLE),
-            e.BTN_NORTH: bool(report[1] & DS4_BTN_TRIANGLE),
-            e.BTN_WEST: bool(report[1] & DS4_BTN_SQUARE),
-            e.BTN_TL: bool(report[1] & DS4_BTN_L1),
-            e.BTN_TR: bool(report[1] & DS4_BTN_R1),
-            e.BTN_SELECT: bool(report[1] & DS4_BTN_SHARE),
-            e.BTN_START: bool(report[1] & DS4_BTN_OPTIONS),
-            e.BTN_THUMBL: bool(report[2] & DS4_BTN_L3),
-            e.BTN_THUMBR: bool(report[2] & DS4_BTN_R3),
-            e.BTN_MODE: bool(report[2] & DS4_BTN_PS),
-        }
-
-        dpad_byte = (report[3] >> 4) & 0x0F
-        dpad_map = {
-            0: (0, 0), 2: (1, 0), 4: (-1, 1), 6: (-1, 0),
-            8: (0, 0), 0xA: (1, 1), 0xC: (0, 1), 0xE: (-1, -1),
-        }
-        dpad_x, dpad_y = dpad_map.get(dpad_byte, (0, 0))
+        state = parse_ds4_report(report)
+        dpad_x, dpad_y = state['dpad_x'], state['dpad_y']
 
         if dpad_x != last_dpad_x:
             code = abs_map.get(DS4Abs.HAT0X.value)
             if code is not None:
-                write_event(_EV_ABS, code, dpad_x)
+                axis_state[DS4Abs.HAT0X] = dpad_x
+                write_event(EV_ABS, code, dpad_x)
                 sync()
 
         if dpad_y != last_dpad_y:
             code = abs_map.get(DS4Abs.HAT0Y.value)
             if code is not None:
-                write_event(_EV_ABS, code, dpad_y)
+                axis_state[DS4Abs.HAT0Y] = dpad_y
+                write_event(EV_ABS, code, dpad_y)
                 sync()
 
-        lx, ly = report[4], report[5]
-        rx, ry = report[6], report[7]
-        l2, r2 = report[8], report[9]
-
-        for code, val in [(DS4Abs.X, lx), (DS4Abs.Y, ly), (DS4Abs.RX, rx), (DS4Abs.RY, ry)]:
-            result = mapper.map_axis(code.value, val)
+        for ds4_code, val in ((DS4Abs.X, state['lx']), (DS4Abs.Y, state['ly']),
+                              (DS4Abs.RX, state['rx']), (DS4Abs.RY, state['ry']),
+                              (DS4Abs.Z, state['l2']), (DS4Abs.RZ, state['r2'])):
+            result = mapper.map_axis(ds4_code.value, val)
             if result:
-                write_event(_EV_ABS, result[0], result[1])
+                write_event(EV_ABS, result[0], result[1])
                 sync()
 
-        for code, val in [(DS4Abs.Z, l2), (DS4Abs.RZ, r2)]:
-            result = mapper.map_axis(code.value, val)
-            if result:
-                write_event(_EV_ABS, result[0], result[1])
-                sync()
-
-        for ds4_code, pressed in buttons.items():
+        for ds4_code, pressed in state['buttons'].items():
             if ds4_code not in btn_map:
                 continue
             prev_state = btn_state.get(ds4_code)
             if prev_state == pressed:
                 continue
             btn_state[ds4_code] = pressed
-            write_event(_EV_KEY, btn_map[ds4_code], 1 if pressed else 0)
+            write_event(EV_KEY, btn_map[ds4_code], 1 if pressed else 0)
             sync()
-            self.raw_event.emit(_EV_KEY, ds4_code, 1 if pressed else 0)
+            self.raw_event.emit(EV_KEY, ds4_code, 1 if pressed else 0)
 
         return dpad_x, dpad_y
 

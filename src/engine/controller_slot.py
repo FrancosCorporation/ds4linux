@@ -11,6 +11,7 @@ from PySide6.QtCore import QObject, Signal
 from .led_controller import LEDController
 from .virtual_device import VirtualDevice, VirtualDeviceType
 from .input_mapper import InputMapper, ProfileConfig
+from .macro_engine import MacroEngine
 from .worker_thread import WorkerThread
 from .device_manager import DeviceManager
 from ..constants import DS4_VID, DS4_PIDS
@@ -48,7 +49,8 @@ class ControllerSlot(QObject):
         self._profile = pm.load_profile(default_name)
 
         self._virtual_device = VirtualDevice(self._profile.device_type, slot_id=self._slot_id)
-        self._input_mapper = InputMapper(self._profile)
+        self._macro_engine = MacroEngine(self._virtual_device)
+        self._input_mapper = InputMapper(self._profile, macro_engine=self._macro_engine)
         self._led_controller = LEDController()
         self._worker = WorkerThread()
         self._battery_level = 100

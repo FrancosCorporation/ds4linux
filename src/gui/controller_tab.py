@@ -116,12 +116,9 @@ class ProfileEditorWindow(QWidget):
         left_panel = QVBoxLayout()
         left_panel.setSpacing(10)
 
-        # Controller image
-        self.controller_image_label = QLabel()
-        self.controller_image_label.setFixedSize(320, 380)
-        self.controller_image_label.setAlignment(Qt.AlignCenter)
-        self._load_controller_image()
-        left_panel.addWidget(self.controller_image_label)
+        # Mapeamento e visualização interativa do controle
+        self.mapping_tab = MappingTabWidget(worker=self.slot._worker if self.slot else None)
+        left_panel.addWidget(self.mapping_tab)
 
         # Gyro buttons below image
         gyro_group = QGroupBox("Gyro Controls")
