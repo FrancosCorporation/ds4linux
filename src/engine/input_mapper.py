@@ -52,7 +52,7 @@ class ProfileConfig:
     name: str = "Default"
     device_type: VirtualDeviceType = VirtualDeviceType.XBOX
     button_maps: Dict[int, int] = field(default_factory=dict)
-    macros: Dict[int, List[MacroAction]] = field(default_factory=dict)
+    macros: Dict[int, list[MacroAction]] = field(default_factory=dict)
     left_stick: AxisConfig = field(default_factory=AxisConfig)
     right_stick: AxisConfig = field(default_factory=AxisConfig)
     left_trigger: TriggerConfig = field(default_factory=TriggerConfig)
