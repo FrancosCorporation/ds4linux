@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import os
-import json
-import subprocess
 import logging
+import os
+import subprocess
 from pathlib import Path
-from typing import Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +14,7 @@ CONFIG_DIR = Path.home() / ".config" / "ds4linux"
 SUDO_PASS_FILE = CONFIG_DIR / ".sudo_pass"
 
 
-def _get_stored_password() -> Optional[str]:
+def _get_stored_password() -> str | None:
     """Read stored sudo password from config, if available."""
     try:
         if SUDO_PASS_FILE.exists():
@@ -43,7 +41,7 @@ def _store_password(password: str) -> bool:
         return False
 
 
-def _run_sudo(command: str, password: Optional[str] = None) -> Tuple[int, str, str]:
+def _run_sudo(command: str, password: str | None = None) -> tuple[int, str, str]:
     """Run a command with sudo, providing password via stdin."""
     pw = password or _get_stored_password()
     try:
@@ -70,7 +68,7 @@ def is_module_loaded(module: str = MODULE_NAME) -> bool:
         return False
 
 
-def load_module(module: str = MODULE_NAME, password: Optional[str] = None) -> bool:
+def load_module(module: str = MODULE_NAME, password: str | None = None) -> bool:
     """Load the hid-playstation kernel module."""
     if is_module_loaded(module):
         logger.info(f"Module {module} already loaded")
@@ -96,7 +94,7 @@ def is_udev_rules_installed() -> bool:
         return False
 
 
-def install_udev_rules(password: Optional[str] = None) -> Tuple[bool, str]:
+def install_udev_rules(password: str | None = None) -> tuple[bool, str]:
     """Install DS4Linux udev rules and reload udev."""
     if not UDEVS_RULES_SOURCE.exists():
         logger.error(f"Rules source not found: {UDEVS_RULES_SOURCE}")
@@ -123,7 +121,7 @@ def install_udev_rules(password: Optional[str] = None) -> Tuple[bool, str]:
     return True, "Regras udev instaladas"
 
 
-def _fix_led_permissions(password: Optional[str] = None):
+def _fix_led_permissions(password: str | None = None):
     """Fix LED sysfs permissions for existing DS4 controllers."""
     import glob
     led_patterns = [
@@ -164,7 +162,7 @@ def scan_ds4_devices() -> list:
         return []
 
 
-def ensure_system_ready(password: Optional[str] = None) -> Tuple[bool, list]:
+def ensure_system_ready(password: str | None = None) -> tuple[bool, list]:
     """
     Ensure all system requirements are met.
     Returns (success, list_of_messages).
@@ -208,7 +206,7 @@ def needs_setup() -> bool:
     return not is_module_loaded() or not is_udev_rules_installed()
 
 
-def auto_setup() -> Tuple[bool, list]:
+def auto_setup() -> tuple[bool, list]:
     """
     Try to set up the system automatically using stored password.
     Returns (success, messages).
@@ -221,7 +219,7 @@ def auto_setup() -> Tuple[bool, list]:
     return ensure_system_ready(password=password)
 
 
-def setup_with_password(password: str) -> Tuple[bool, list]:
+def setup_with_password(password: str) -> tuple[bool, list]:
     """
     Save password and run full setup.
     Call this when user provides password in the dialog.

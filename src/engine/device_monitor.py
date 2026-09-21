@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import evdev
-import pyudev
-from typing import List, Optional
 import logging
 
-from PySide6.QtCore import QObject, QThread, Signal, QTimer
+import evdev
+import pyudev
+from PySide6.QtCore import QObject, QThread, QTimer, Signal
 
-from ..constants import DS4_VID, DS4_PIDS
+from ..constants import DS4_PIDS, DS4_VID
 
 logger = logging.getLogger(__name__)
 
@@ -25,11 +24,11 @@ class DeviceMonitor(QObject):
 
     def __init__(self, parent: QObject | None = None):
         super().__init__(parent)
-        self._ctx: Optional[pyudev.Context] = None
-        self._monitor: Optional[pyudev.Monitor] = None
+        self._ctx: pyudev.Context | None = None
+        self._monitor: pyudev.Monitor | None = None
         self._running = False
-        self._thread: Optional[QThread] = None
-        self._timer: Optional[QTimer] = None
+        self._thread: QThread | None = None
+        self._timer: QTimer | None = None
 
     def start(self) -> None:
         self._thread = QThread()
@@ -129,7 +128,7 @@ class DeviceMonitor(QObject):
             self.device_removed.emit(device_path)
 
     def _scan_existing(self) -> None:
-        paths: List[str] = []
+        paths: list[str] = []
         for p in evdev.list_devices():
             if self._is_real_ds4(p):
                 paths.append(p)

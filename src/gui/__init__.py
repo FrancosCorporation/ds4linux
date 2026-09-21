@@ -1,7 +1,5 @@
-"""GUI package for DS4Linux."""
+"""GUI package — PySide6 widgets.
 
-from .main_window import MainWindow
-from .controller_tab import ProfileTabWidget
-from .controllers_table import ControllersTableWidget
-
-__all__ = ["MainWindow", "ProfileTabWidget", "ControllersTableWidget"]
+Import the specific widget module you need (``src.gui.main_window``,
+``src.gui.controller_tab``, ...) instead of relying on package re-exports.
+"""

@@ -2,13 +2,21 @@ from __future__ import annotations
 
 import logging
 
+from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QTableWidget, QTableWidgetItem,
-    QHeaderView, QAbstractItemView, QComboBox, QPushButton,
-    QCheckBox, QColorDialog
+    QAbstractItemView,
+    QCheckBox,
+    QColorDialog,
+    QComboBox,
+    QHeaderView,
+    QLabel,
+    QPushButton,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
 )
-from PySide6.QtCore import Qt, Signal, QSize
-from PySide6.QtGui import QColor, QIcon, QPixmap, QPainter
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +27,7 @@ class ControllersTableWidget(QWidget):
     """
     DS4Windows-style controllers table.
     Columns: #, ID, Status, Ex, Battery, Link Profile ☑, Selected Profile ▼, Color █, Editar
-    
+
     Dynamically shows only connected controllers - starts empty.
     """
     controller_edit = Signal(int)  # slot_id
@@ -32,6 +40,7 @@ class ControllersTableWidget(QWidget):
         self._connect_signals()
         # Start with empty table
         self.table.setRowCount(0)
+        self._sync_empty_state()
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -40,8 +49,8 @@ class ControllersTableWidget(QWidget):
         self.table = QTableWidget()
         self.table.setColumnCount(9)
         self.table.setHorizontalHeaderLabels([
-            "#", "ID", "Status", "Ex", "Battery",
-            "Link Profile", "Selected Profile", "Color", ""
+            "#", "ID", "Status", "Grab", "Bateria",
+            "Perfil vinculado", "Perfil selecionado", "Cor", "Editar"
         ])
         header = self.table.horizontalHeader()
         header.setStretchLastSection(True)
@@ -57,6 +66,15 @@ class ControllersTableWidget(QWidget):
         self.table.setAlternatingRowColors(True)
 
         layout.addWidget(self.table)
+
+        self.empty_hint = QLabel(
+            "Nenhum controle detectado.\n\n"
+            "Conecte um DualShock 4 via USB ou Bluetooth.\n"
+            "O controle virtual é criado automaticamente."
+        )
+        self.empty_hint.setAlignment(Qt.AlignCenter)
+        self.empty_hint.setObjectName("dimLabel")
+        layout.addWidget(self.empty_hint)
 
     def _connect_signals(self):
         # Device add/remove signals
@@ -132,6 +150,12 @@ class ControllersTableWidget(QWidget):
             self._insert_row(row, slot)
             row += 1
         self.table.resizeRowsToContents()
+        self._sync_empty_state()
+
+    def _sync_empty_state(self):
+        empty = self.table.rowCount() == 0
+        self.empty_hint.setVisible(empty)
+        self.table.setVisible(not empty)
 
     def _refresh_row(self, slot_id: int):
         """Refresh the row for a specific slot."""
@@ -165,11 +189,12 @@ class ControllersTableWidget(QWidget):
                         ex_item.setToolTip("Device Grabber Active")
                     bat_item = self.table.item(r, 4)
                     if bat_item:
-                        bat_item.setText(f"{slot.battery_level}%")
+                        bat_item.setText(f"{slot.battery_level}%" if slot.battery_level > 0 else "--")
                     self._set_led_color_cell(r, slot)
                 else:
                     # Device disconnected
                     self.table.removeRow(r)
+                self._sync_empty_state()
                 break
 
     def _insert_row(self, row: int, slot):
@@ -223,7 +248,7 @@ class ControllersTableWidget(QWidget):
         # Column 4: Battery
         bat_item = QTableWidgetItem()
         if slot.is_connected:
-            bat_item.setText(f"{slot.battery_level}%")
+            bat_item.setText(f"{slot.battery_level}%" if slot.battery_level > 0 else "--")
         else:
             bat_item.setText("--")
         self.table.setItem(row, 4, bat_item)
@@ -259,11 +284,9 @@ class ControllersTableWidget(QWidget):
 
         # Column 8: Edit button
         edit_btn = QPushButton("Editar")
-        edit_btn.setFixedWidth(60)
-        def debug_click(checked, sid=slot.slot_id):
-            print(f"[DEBUG] Botão Editar clicado para slot {sid}")
-            self.controller_edit.emit(sid)
-        edit_btn.clicked.connect(debug_click)
+        edit_btn.setObjectName("primaryButton")
+        edit_btn.setFixedWidth(76)
+        edit_btn.clicked.connect(lambda _checked=False, sid=slot.slot_id: self.controller_edit.emit(sid))
         self.table.setCellWidget(row, 8, edit_btn)
 
     def _set_led_color_cell(self, row: int, slot):
@@ -292,12 +315,12 @@ class ControllersTableWidget(QWidget):
         """Open color dialog when LED color cell is clicked."""
         if col != 7:
             return
-        
+
         # Get the slot for this specific row
         slot = self._row_to_slot.get(row) if hasattr(self, '_row_to_slot') else None
         if not slot:
             return
-        
+
         current_color = QColor(*slot.get_led_color())
         color = QColorDialog.getColor(current_color, self, "Selecione a cor do LED")
         if color.isValid():

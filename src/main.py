@@ -1,22 +1,20 @@
-from PySide6.QtWidgets import QApplication
-from PySide6.QtCore import Qt
-from PySide6.QtNetwork import QLocalServer, QLocalSocket
-import sys
-import signal
 import logging
-from pathlib import Path
 import os
+import signal
+import sys
+from pathlib import Path
 
+from PySide6.QtNetwork import QLocalServer, QLocalSocket
+from PySide6.QtWidgets import QApplication
+
+from .constants import APP_VERSION
+from .engine.system_checker import (
+    _has_stored_password,
+    auto_setup,
+    needs_setup,
+)
 from .gui.main_window import MainWindow
 from .gui.setup_dialog import SetupDialog
-from .engine.system_checker import (
-    ensure_system_ready,
-    needs_setup,
-    auto_setup,
-    is_module_loaded,
-    is_udev_rules_installed,
-    _has_stored_password,
-)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -97,7 +95,7 @@ def main():
 
     app = QApplication(sys.argv)
     app.setApplicationName("DS4Linux")
-    app.setApplicationVersion("1.3.1")
+    app.setApplicationVersion(APP_VERSION)
     app.setOrganizationName("DS4Linux")
     app.setOrganizationDomain("ds4linux.app")
     app.setQuitOnLastWindowClosed(False)
@@ -110,7 +108,6 @@ def main():
 
     # Try automatic setup using stored password (no dialog if password exists)
     setup_needed = needs_setup()
-    setup_done = False
 
     if setup_needed:
         if _has_stored_password():
@@ -118,23 +115,21 @@ def main():
             logger.info("Stored password found, running automatic setup...")
             ok, msgs = auto_setup()
             if ok:
-                setup_done = True
                 logger.info("Auto-setup succeeded")
             else:
                 # Auto-setup failed — show dialog to retry
-                logger.warning(f"Auto-setup failed: {msgs}")
+                logger.warning("Auto-setup failed: %s", msgs)
                 dlg = SetupDialog()
-                if dlg.exec() == SetupDialog.Accepted:
-                    setup_done = True
+                dlg.exec()
         else:
             # No password stored — show setup dialog
             logger.info("No stored password, showing setup dialog...")
             dlg = SetupDialog()
-            if dlg.exec() == SetupDialog.Accepted:
-                setup_done = True
+            dlg.exec()
 
     window = MainWindow()
     checker.set_window(window)
+    app.aboutToQuit.connect(window.cleanup)
     window.show()
 
     # Initial device scan — called directly after show() to avoid

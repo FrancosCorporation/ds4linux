@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ds4linux"
+version = "1.4.0"
+description = "DualShock 4 emulator for Linux — Xbox 360 / PS4 virtual controller"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "evdev>=1.6.1",
+    "PySide6>=6.5.0",
+    "pyudev>=0.24.0",
+]
+
+[project.scripts]
+ds4linux = "src.main:main"
+
+[tool.setuptools]
+packages = ["src", "src.engine", "src.gui", "src.config"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP"]
+ignore = [
+    "E501",  # line length handled by the formatter
+    "UP031", # percent formatting kept in a few log strings
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E402"]  # QApplication must be created before widget imports

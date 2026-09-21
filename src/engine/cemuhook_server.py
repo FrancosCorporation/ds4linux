@@ -1,8 +1,6 @@
-import socket
-import struct
-import threading
 import logging
-import time
+import socket
+import threading
 
 logger = logging.getLogger(__name__)
 

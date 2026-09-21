@@ -1,4 +1,4 @@
-from enum import IntEnum, Enum
+from enum import IntEnum
 from pathlib import Path
 
 
@@ -64,7 +64,7 @@ class DS4Btn(IntEnum):
     DPAD_LEFT = 0x222
     DPAD_RIGHT = 0x223
     PS = 0x13C
-    TOUCHPAD = 0x13F
+    TOUCHPAD = 0x14A  # evdev BTN_TOUCH — kernel code for a DS4 touchpad click
 
 
 class XboxBtn(IntEnum):
@@ -105,7 +105,7 @@ class PS4Btn(IntEnum):
     DPAD_LEFT = 0x222
     DPAD_RIGHT = 0x223
     PS = 0x13C
-    TOUCHPAD = 0x13F
+    TOUCHPAD = 0x14A  # evdev BTN_TOUCH — kernel code for a DS4 touchpad click
 
 
 class XboxAbs(IntEnum):

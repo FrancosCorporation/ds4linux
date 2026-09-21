@@ -1,13 +1,12 @@
 import json
-from pathlib import Path
-from typing import Dict, List, Optional
 import logging
+from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal
 
-from ..constants import PROFILE_DIR, CONFIG_FILE
+from ..constants import CONFIG_FILE, PROFILE_DIR
+from ..engine.input_mapper import AxisConfig, ProfileConfig, TriggerConfig
 from ..engine.virtual_device import VirtualDeviceType
-from ..engine.input_mapper import ProfileConfig, AxisConfig, TriggerConfig
 
 logger = logging.getLogger(__name__)
 
@@ -21,14 +20,14 @@ class ProfileManager(QObject):
         super().__init__()
         PROFILE_DIR.mkdir(parents=True, exist_ok=True)
         CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
-        self._current_profile_name: Optional[str] = None
+        self._current_profile_name: str | None = None
         self._load_last_used()
         self.seed_default_profiles()
 
     def _load_last_used(self):
         try:
             if CONFIG_FILE.exists():
-                with open(CONFIG_FILE, "r") as f:
+                with open(CONFIG_FILE) as f:
                     data = json.load(f)
                     self._current_profile_name = data.get("last_profile")
         except Exception as e:
@@ -45,7 +44,7 @@ class ProfileManager(QObject):
     def get_profile_path(self, name: str) -> Path:
         return PROFILE_DIR / f"{name}.json"
 
-    def list_profiles(self) -> List[str]:
+    def list_profiles(self) -> list[str]:
         profiles = []
         for f in PROFILE_DIR.glob("*.json"):
             profiles.append(f.stem)
@@ -62,7 +61,7 @@ class ProfileManager(QObject):
             return self.load_profile("Xbox 360")
 
         try:
-            with open(path, "r") as f:
+            with open(path) as f:
                 data = json.load(f)
             profile = self._dict_to_profile(data)
             self._current_profile_name = name
@@ -111,7 +110,7 @@ class ProfileManager(QObject):
             logger.error(f"Failed to delete profile {name}: {e}")
         return False
 
-    def get_current_profile_name(self) -> Optional[str]:
+    def get_current_profile_name(self) -> str | None:
         return self._current_profile_name
 
     def _create_xbox360_profile(self, name: str = "Xbox 360") -> ProfileConfig:
@@ -158,7 +157,7 @@ class ProfileManager(QObject):
 
     def seed_default_profiles(self):
         """Create two preset profiles on first launch:
-        
+
         1. 'Xbox 360' - Emulates an Xbox 360 controller (DS4 buttons → Xbox layout)
         2. 'PlayStation 4' - Emulates a DualShock 4 controller (native PS4 button names)
         """
@@ -220,6 +219,7 @@ class ProfileManager(QObject):
             },
             "led_color": profile.led_color,
             "led_brightness": profile.led_brightness,
+            "poll_rate_ms": profile.poll_rate_ms,
         }
 
     def _dict_to_profile(self, data: dict) -> ProfileConfig:
@@ -238,4 +238,5 @@ class ProfileManager(QObject):
             right_trigger=TriggerConfig(**rt),
             led_color=tuple(data.get("led_color", (0, 0, 255))),
             led_brightness=data.get("led_brightness", 255),
+            poll_rate_ms=int(data.get("poll_rate_ms", 10)),
         )

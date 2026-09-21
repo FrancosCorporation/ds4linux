@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-import os
-import select
 import logging
-from typing import Optional, List, Tuple
-from pathlib import Path
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +92,7 @@ def parse_ds4_report(report: bytes) -> dict:
         e.BTN_THUMBL: bool(b1 & 0x40),   # L3
         e.BTN_THUMBR: bool(b1 & 0x80),   # R3
         e.BTN_MODE:   bool(b2 & 0x01),   # PS
+        e.BTN_TOUCH:  bool(b2 & 0x02),   # Touchpad click
     }
 
     return {
@@ -150,32 +148,36 @@ class DS4HIDRAWReader:
     def is_open(self) -> bool:
         return self._fd >= 0
 
-    def read_report(self) -> Optional[bytes]:
-        """Read a single 64-byte input report using select() to wait for data."""
+    # Largest input report we may see: Bluetooth 0x11 reports are 78 bytes,
+    # USB 0x01 reports are 64 bytes.  hidraw is report-oriented, so a single
+    # read() always returns one whole report (truncated to the buffer size).
+    MAX_REPORT_SIZE = 78
+    MIN_REPORT_SIZE = 12
+
+    def read_report(self) -> bytes | None:
+        """Read one DS4 input report (USB 64 B / Bluetooth 78 B).
+
+        The fd is opened O_NONBLOCK and the caller (worker loop) already
+        select()s for readability, so this is a plain non-blocking read —
+        no extra wait in the hot path.
+        """
         if self._fd < 0:
             return None
 
         try:
-            # Wait for data to be available
-            readable, _, _ = select.select([self._fd], [], [], 0.05)
-            if not readable:
-                return None
-
-            data = os.read(self._fd, 64)
-            if len(data) == 64:
+            data = os.read(self._fd, self.MAX_REPORT_SIZE)
+            if len(data) >= self.MIN_REPORT_SIZE:
                 return data
-            elif len(data) > 0:
-                # Partial report, try to read more
-                remaining = 64 - len(data)
-                extra = os.read(self._fd, remaining)
-                return data + extra
             return None
         except BlockingIOError:
             return None
-        except Exception as e:
-            logger.warning(f"DS4HIDRAWReader: Read error: {e}")
-            return None
-    
+        except OSError as exc:
+            # Real I/O failure (ENODEV/EIO/EBADF — device unplugged, BT drop).
+            # Propagate so the worker can treat it as a disconnect instead of
+            # silently spinning on a dead fd.
+            logger.warning("DS4HIDRAWReader: read failed: %s", exc)
+            raise
+
     def parse_buttons(self, report: bytes) -> dict:
         """Parse button state (evdev code -> bool) from an input report."""
         return parse_ds4_report(report)['buttons']
@@ -198,28 +200,40 @@ class DS4HIDRAWReader:
         return {'x': parsed['dpad_x'], 'y': parsed['dpad_y']}
 
 
-def find_ds4_hidraw() -> Optional[str]:
-    """Find the hidraw device for a DS4/Wireless Controller."""
+def find_ds4_hidraw(uniq: str | None = None) -> str | None:
+    """Find the hidraw device for a DS4/Wireless Controller.
+
+    When ``uniq`` (the Bluetooth MAC reported by evdev) is given, the
+    matching hidraw node is returned so multiple controllers each read
+    their own reports.  Falls back to the first Sony hidraw device.
+    Uses udev properties (HID_ID/HID_NAME/HID_UNIQ) — no manual file reads.
+    """
     import pyudev
-    
+
+    fallback = None
+    normalized_uniq = (uniq or "").lower().replace(":", "")
+
     try:
         ctx = pyudev.Context()
         for dev in ctx.list_devices(subsystem='hidraw'):
-            try:
-                # dev.device_path is the kernel path, prepend /sys for sysfs
-                sysfs_path = '/sys' + dev.device_path
-                uevent_path = os.path.join(sysfs_path, 'device', 'uevent')
-                if os.path.exists(uevent_path):
-                    uevent = open(uevent_path).read()
-                    # Match Sony vendor (054C) or Wireless Controller
-                    if '054C' in uevent or 'Wireless Controller' in uevent:
-                        return dev.device_node
-            except Exception:
+            node = dev.device_node
+            if not node:
                 continue
+            hid_id = (dev.get('HID_ID') or '').upper()
+            hid_name = dev.get('HID_NAME') or ''
+            # Match Sony vendor (054C) or Wireless Controller
+            if '054C' not in hid_id and 'Wireless Controller' not in hid_name:
+                continue
+            if fallback is None:
+                fallback = node
+            if normalized_uniq:
+                hid_uniq = (dev.get('HID_UNIQ') or '').lower().replace(":", "")
+                if normalized_uniq == hid_uniq:
+                    return node
     except Exception as e:
-        logger.warning(f"find_ds4_hidraw: {e}")
-    
-    return None
+        logger.warning("find_ds4_hidraw: %s", e)
+
+    return fallback
 
 
 def is_ds4_hidraw(hidraw_path: str) -> bool:

@@ -1,5 +1,9 @@
 # DS4Linux
 
+## ℹ️ Sobre este repositório
+
+Suporte a DualShock/DualSense no Linux (fork/estudo).
+
 **DualShock 4 Emulator for Linux** - Use your PlayStation 4 controller as an Xbox or PlayStation 4 virtual controller on Linux.
 
 ## Features
@@ -18,8 +22,11 @@
 - **Gyro support** - Mouse emulation, sensitivity, calibration
 - **Rumble forwarding** - EV_FF/FF_RUMBLE from games forwarded to physical controller via select()-based async I/O
 - **System tray integration** - Minimize to tray, runs in background
-- **Dark/Minimalist UI** - DS4Windows-inspired PySide6 interface (Controllers table, Profile tabs)
+- **DS4Windows-style UI** - Clickable DS4 artwork (D-pad, face buttons, shoulders, sticks, touchpad) with live highlight, per-button mapping list (listen/edit/remove/reset), Axis/Lightbar/Gyro/Other tabs, integrated log and dark theme
 - **Background daemon** - QThread-based event loop, never blocks GUI
+- **D-pad hardened** - Correct HAT handling for hid-sony (BTN_DPAD_*), hid-playstation (ABS_HAT) and HIDRAW; no stuck diagonals, no duplicate writes
+- **Automated tests + CI** - 45 unit/smoke tests (D-pad regression, HID report parser, worker paths, offscreen GUI) and GitHub Actions workflow
+- **Configurable polling** - 1/2/4/10 ms worker tick per profile
 
 ## Architecture
 
@@ -35,6 +42,7 @@ ds4linux/
 │   │   ├── device_monitor.py      # pyudev hot-plug detection (add/remove DS4 via udev netlink)
 │   │   ├── device_manager.py      # Scans /dev/input, filters real DS4 (VID/PID), calls grab()
 │   │   ├── controller_slot.py     # Per-controller state machine: attach/detach, LED, profile, worker lifecycle
+│   │   ├── dpad.py                # D-pad/HAT state machine shared by evdev + HIDRAW
 │   │   ├── worker_thread.py       # QThread: select()-based I/O on physical fd + uinput fd
 │   │   │                          #   → maps buttons/axes physical→virtual (EV_KEY, EV_ABS)
 │   │   │                          #   → forwards rumble virtual→physical (EV_FF → device.write)
@@ -64,10 +72,9 @@ ds4linux/
 │       │                          #   AxisConfigWidget (LS/RS/L2/R2 spinboxes, curves, square stick)
 │       │                          #   TouchpadWidget, GyroWidget, OtherWidget
 │       │                          #   Profile load/save/cancel, device type switch
-│       ├── mapping_tab.py         # Nova interface de mapeamento:
-│       │                          #   ControllerOverlayWidget (imagem + botões transparentes)
-│       │                          #   ListenDialog (captura evento bruto do evdev)
-│       │                          #   MappingWizardDialog (wizard passo-a-passo)
+│       ├── mapping_tab.py         # Clickable controller overlay + mapping list:
+│       │                          #   ControllerOverlayWidget (asset + hotspots de todas as teclas)
+│       │                          #   ListenDialog (captura evento bruto), TargetPickerDialog
 │       ├── color_dialog.py        # Custom HSV color wheel dialog (ported from DS4Windows C#)
 │       ├── visual_mapping.py      # DS4 SVG outline with clickable button regions
 │       └── styles.py              # QSS dark theme: #1e1e2e bg, #00d4aa accent, rounded corners
@@ -78,6 +85,9 @@ ds4linux/
 │   │                              #   → /usr/local/bin/ds4linux launcher script
 │   │                              #   → chown/chmod existing LED sysfs (udevadm trigger doesn't reapply)
 ├── requirements.txt               # python-evdev, PySide6, pyudev
+├── pyproject.toml                 # metadata + ruff config
+├── .github/workflows/tests.yml     # CI: unittest (offscreen Qt) + ruff
+├── tests/                         # unittest suite (D-pad, HID parser, worker, GUI smoke)
 ├── setup.py                       # Package metadata
 └── README.md
 ```
@@ -263,6 +273,11 @@ python3 -m src.main
 - Check udev rule for uinput exists
 - Verify: `ls -la /dev/uinput` should be `crw-rw-rw-`
 
+**D-pad stuck / wrong directions:**
+- Fixed since v1.4.0: the worker keeps pressed directions in a set (`src/engine/dpad.py`), so releasing one arrow during a diagonal no longer leaves a stuck axis
+- Covered by `tests/test_dpad.py`, `tests/test_worker_dpad.py` and `tests/test_ds4_hidraw.py`; run `python -m unittest discover -s tests`
+- If a clone emulates the D-pad as `BTN_DPAD_*` (hid-sony) or `ABS_HAT0X/Y` (hid-playstation), both paths are handled
+
 **Double input (both physical + virtual):**
 - DS4Linux uses `evdev.grab()` for exclusive access
 - Ensure no other tools (steam, ds4drv) are grabbing the device
@@ -339,7 +354,12 @@ python3 -m src.main
 - [ ] **SDL GUID validation** - Confirm virtual device GUID matches expected Xbox/PS4 signatures
 - [ ] **Rumble magnitude mapping** - Proportional forwarding (game sends 0-1 → map to physical 0-255)
 
-### v1.4.0 - Planned
+### v1.4.0 - In Progress
+- [x] **D-pad hardening** - Shared HAT state machine (evdev BTN_DPAD / ABS_HAT + HIDRAW), regression tests
+- [x] **DS4Windows-style Controls UI** - Clickable overlay for every button, mapping list, target picker
+- [x] **Test suite + CI** - 45 tests (unittest, offscreen Qt) + ruff + GitHub Actions
+- [x] **Configurable polling** - 1/2/4/10 ms worker tick saved per profile
+- [x] **Tray + integrated log** - System tray menu and live log tab
 - [ ] **Auto-profiles** - Switch profiles automatically per game (detect via window title / game binary)
 - [ ] **Profile import/export** - Share profiles as `.ds4profile` files
 - [ ] **DualSense (PS5) full support** - Adaptive triggers, haptic feedback, microphone LED

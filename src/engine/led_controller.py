@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Optional, Tuple, List
 import logging
+import os
 import struct
 import zlib
-import os
+from pathlib import Path
 
 from . import device_manager
 
@@ -45,23 +44,23 @@ class LEDController:
     The GUI virtual LED display is always driven by sysfs brightness files.
     """
 
-    def __init__(self, led_path: Optional[Path] = None):
-        self._led_path: Optional[Path] = None
-        self._hid_device_path: Optional[Path] = None  # Specific hidraw device
+    def __init__(self, led_path: Path | None = None):
+        self._led_path: Path | None = None
+        self._hid_device_path: Path | None = None  # Specific hidraw device
         # Old driver (hid-sony) paths
-        self._red_path: Optional[Path] = None
-        self._green_path: Optional[Path] = None
-        self._blue_path: Optional[Path] = None
-        self._brightness_path: Optional[Path] = None
+        self._red_path: Path | None = None
+        self._green_path: Path | None = None
+        self._blue_path: Path | None = None
+        self._brightness_path: Path | None = None
         # New driver (hid-playstation) paths
-        self._colors_path: Optional[Path] = None       # inputNN:rgb:indicator/colors
-        self._multi_intensity_path: Optional[Path] = None
-        self._global_path: Optional[Path] = None
+        self._colors_path: Path | None = None       # inputNN:rgb:indicator/colors
+        self._multi_intensity_path: Path | None = None
+        self._global_path: Path | None = None
 
         self._max_brightness = 255
-        self._current_color: Tuple[int, int, int] = (0, 0, 255)
+        self._current_color: tuple[int, int, int] = (0, 0, 255)
         self._enabled = True
-        self._driver: Optional[str] = None  # 'sony' | 'playstation' | None
+        self._driver: str | None = None  # 'sony' | 'playstation' | None
 
         if led_path:
             self.set_led_path(led_path)
@@ -70,7 +69,7 @@ class LEDController:
     # Driver detection
     # ------------------------------------------------------------------
     @staticmethod
-    def detect_driver() -> Optional[str]:
+    def detect_driver() -> str | None:
         """Detect whether hid-sony or hid-playstation driver is active."""
         drivers_dir = Path("/sys/bus/hid/drivers")
         if not drivers_dir.exists():
@@ -86,7 +85,7 @@ class LEDController:
         return None
 
     @staticmethod
-    def _find_input_device_name(device_path: str) -> Optional[str]:
+    def _find_input_device_name(device_path: str) -> str | None:
         """Extract the input device name (e.g. 'input171') from an event path."""
         from pathlib import Path as P
         try:
@@ -353,7 +352,7 @@ class LEDController:
     # ------------------------------------------------------------------
     # Query helpers
     # ------------------------------------------------------------------
-    def get_color(self) -> Tuple[int, int, int]:
+    def get_color(self) -> tuple[int, int, int]:
         return self._current_color
 
     def set_enabled(self, enabled: bool):
@@ -368,7 +367,7 @@ class LEDController:
             or self._colors_path or self._global_path
         )
 
-    def get_driver(self) -> Optional[str]:
+    def get_driver(self) -> str | None:
         """Return detected driver name: 'sony', 'playstation', or None."""
         return self._driver
 
@@ -376,12 +375,13 @@ class LEDController:
     # Static: find DS4 LED sysfs base path
     # ------------------------------------------------------------------
     @staticmethod
-    def find_ds4_led(device_path: str) -> Optional[Path]:
+    def find_ds4_led(device_path: str) -> Path | None:
         """
         Find the LED sysfs base directory for a DS4 controller.
         """
-        from ..constants import SYS_LEDS_BASE
         from pathlib import Path as P
+
+        from ..constants import SYS_LEDS_BASE
 
         try:
             input_sysfs = P(f"/sys/class/input/{P(device_path).name}")

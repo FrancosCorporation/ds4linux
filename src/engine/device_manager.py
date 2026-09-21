@@ -1,8 +1,7 @@
 """Device helper utilities (legacy DeviceManager simplified)."""
 
-from pathlib import Path
-from typing import Optional, List
 import os
+from pathlib import Path
 
 from evdev import InputDevice
 
@@ -15,11 +14,11 @@ class DeviceManager:
     """
 
     def __init__(self):
-        self._device: Optional[InputDevice] = None
+        self._device: InputDevice | None = None
         self._grabbed = False
 
     @staticmethod
-    def get_led_path(device: InputDevice) -> Optional[Path]:
+    def get_led_path(device: InputDevice) -> Path | None:
         from ..constants import SYS_LEDS_BASE
 
         name = device.name.lower().replace(" ", "_").replace("(", "").replace(")", "")
@@ -33,13 +32,12 @@ class DeviceManager:
         return None
 
     @staticmethod
-    def get_hid_device() -> Optional[int]:
+    def get_hid_device() -> int | None:
         """
         Returns the HID device file descriptor (int) for the first
         connected DS4/DualSense controller, or None if no controller
         is available.
         """
-        from ..constants import HIDRAW_BASE
 
         # Method 1: Search via sysfs hid devices
         hidraw_sysfs = Path("/sys/bus/hid/devices")
@@ -67,7 +65,7 @@ class DeviceManager:
                                             return os.open(str(hidraw_path), os.O_RDWR)
                                         except (OSError, PermissionError):
                                             continue
-                except (OSError, IOError):
+                except OSError:
                     continue
 
         # Method 2: Direct search in /dev/hidraw*
@@ -83,18 +81,17 @@ class DeviceManager:
                         if "HID_NAME=Wireless Controller" in content and \
                            "054C" in content:
                             return os.open(str(hidraw_dev), os.O_RDWR)
-            except (OSError, IOError):
+            except OSError:
                 continue
 
         return None
 
     @staticmethod
-    def get_all_hid_devices() -> List[int]:
+    def get_all_hid_devices() -> list[int]:
         """
         Returns list of HID device file descriptors for all
         connected DS4/DualSense controllers.
         """
-        from ..constants import HIDRAW_BASE
         fds = []
 
         # Search via sysfs
@@ -122,13 +119,13 @@ class DeviceManager:
                                             fds.append(fd)
                                         except (OSError, PermissionError):
                                             continue
-                except (OSError, IOError):
+                except OSError:
                     continue
 
         return fds
 
     @staticmethod
-    def get_hid_device_path(device: InputDevice) -> Optional[Path]:
+    def get_hid_device_path(device: InputDevice) -> Path | None:
         """
         Returns the HID device path (e.g. /dev/hidraw3) for a specific
         InputDevice, or None if not found.
@@ -157,7 +154,7 @@ class DeviceManager:
                                 if hidraw_dev.is_dir():
                                     hidraw_name = hidraw_dev.name
                                     return Path(f"/dev/{hidraw_name}")
-                except (OSError, IOError):
+                except OSError:
                     continue
 
         return None

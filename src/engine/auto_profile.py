@@ -5,9 +5,8 @@ import logging
 import os
 import re
 import subprocess
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import List, Optional, Tuple
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
@@ -61,12 +60,12 @@ class AutoProfileManager(QObject):
     def __init__(self, profile_manager=None, parent: QObject | None = None):
         super().__init__(parent)
         self._profile_manager = profile_manager
-        self._rules: List[AutoProfileRule] = []
+        self._rules: list[AutoProfileRule] = []
         self._default_profile: str = ""
         self._revert_to_default: bool = True
         self._enabled: bool = True
-        self._current_profile: Optional[str] = None
-        self._last_key: Optional[tuple] = None
+        self._current_profile: str | None = None
+        self._last_key: tuple | None = None
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self.check_now)
@@ -83,7 +82,7 @@ class AutoProfileManager(QObject):
     def _load(self):
         try:
             if self._file().exists():
-                with open(self._file(), "r") as f:
+                with open(self._file()) as f:
                     data = json.load(f)
                 self._enabled = bool(data.get("enabled", True))
                 self._revert_to_default = bool(data.get("revert_to_default", True))
@@ -113,7 +112,7 @@ class AutoProfileManager(QObject):
     # ------------------------------------------------------------------
     # Rule CRUD
     # ------------------------------------------------------------------
-    def rules(self) -> List[AutoProfileRule]:
+    def rules(self) -> list[AutoProfileRule]:
         return list(self._rules)
 
     def add_rule(self, rule: AutoProfileRule):
@@ -161,7 +160,7 @@ class AutoProfileManager(QObject):
     # ------------------------------------------------------------------
     # Foreground window detection (X11)
     # ------------------------------------------------------------------
-    def get_foreground_info(self) -> Optional[Tuple[str, str]]:
+    def get_foreground_info(self) -> tuple[str, str] | None:
         """Return (process_name, window_title) of the active window or None."""
         if os.environ.get("DISPLAY"):
             info = self._get_foreground_x11()
@@ -170,7 +169,7 @@ class AutoProfileManager(QObject):
         # Wayland / unknown: fall back to process scan for known game binaries
         return self._get_foreground_by_process()
 
-    def _get_foreground_x11(self) -> Optional[Tuple[str, str]]:
+    def _get_foreground_x11(self) -> tuple[str, str] | None:
         try:
             out = subprocess.run(
                 ["xprop", "-root", "_NET_ACTIVE_WINDOW"],
@@ -223,7 +222,7 @@ class AutoProfileManager(QObject):
     @staticmethod
     def _proc_name_from_pid(pid: int) -> str:
         try:
-            with open(f"/proc/{pid}/comm", "r") as f:
+            with open(f"/proc/{pid}/comm") as f:
                 return f.read().strip()
         except Exception:
             pass
@@ -235,7 +234,7 @@ class AutoProfileManager(QObject):
             pass
         return ""
 
-    def _get_foreground_by_process(self) -> Optional[Tuple[str, str]]:
+    def _get_foreground_by_process(self) -> tuple[str, str] | None:
         """Fallback for Wayland: scan running processes for known game apps."""
         known = ("wine", "proton", "heroic", "lutris", "steam", "godot",
                  "unity", "game", "eluauncher", "hydra", "playnite")
@@ -286,7 +285,7 @@ class AutoProfileManager(QObject):
             self.active_profile_changed.emit(profile_name)
             self.profile_apply_requested.emit(profile_name)
 
-    def _match_rule(self, process_name: str, window_title: str) -> Optional[str]:
+    def _match_rule(self, process_name: str, window_title: str) -> str | None:
         for rule in self._rules:
             if rule.is_match(process_name, window_title):
                 return rule.profile

@@ -1,9 +1,16 @@
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QBrush, QColor, QPainter
 from PySide6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QWidget, QGridLayout, QSlider, QSpinBox, QColorDialog
+    QDialog,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QSpinBox,
+    QVBoxLayout,
+    QWidget,
 )
-from PySide6.QtCore import Qt, Signal, QSize
-from PySide6.QtGui import QColor, QPixmap, QPainter, QLinearGradient, QBrush, QCursor
 
 from .styles import get_stylesheet
 
@@ -146,7 +153,6 @@ class ValueSlider(QWidget):
             w = self.width()
             h = self.height()
             for x in range(w):
-                hue = self._value
                 color = QColor.fromHsvF(0, 0, x / w)
                 painter.setPen(color)
                 painter.drawLine(x, 0, x, h)
@@ -269,7 +275,6 @@ class ColorDialog(QDialog):
         layout.addLayout(btn_layout)
 
     def _create_spinbox(self):
-        from PySide6.QtWidgets import QSpinBox
         spin = QSpinBox()
         spin.setRange(0, 255)
         spin.setFixedWidth(60)
@@ -331,6 +336,3 @@ class ColorDialog(QDialog):
         if dialog.exec() == QDialog.Accepted:
             return dialog.get_color()
         return initial_color
-
-
-from PySide6.QtWidgets import QLineEdit

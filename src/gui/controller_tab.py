@@ -1,40 +1,73 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
-from typing import Optional, Dict
 
+from PySide6.QtCore import QSettings, Qt, Signal
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QFormLayout,
-    QComboBox, QPushButton, QLabel, QSpinBox, QDoubleSpinBox,
-    QCheckBox, QSlider, QTableWidget, QTableWidgetItem,
-    QHeaderView, QAbstractItemView, QListWidget, QListWidgetItem,
-    QGridLayout, QLineEdit, QRadioButton, QTabWidget, QFrame,
-    QScrollArea, QStyle, QMessageBox, QButtonGroup, QProgressBar,
-    QSpacerItem, QSizePolicy, QMenu
+    QCheckBox,
+    QComboBox,
+    QDoubleSpinBox,
+    QFormLayout,
+    QFrame,
+    QGridLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QProgressBar,
+    QPushButton,
+    QScrollArea,
+    QSlider,
+    QSpinBox,
+    QTabWidget,
+    QVBoxLayout,
+    QWidget,
 )
-from PySide6.QtCore import Qt, Signal, Slot, QSize, QRectF
-from PySide6.QtGui import QColor, QIcon, QPixmap, QPainter, QBrush, QPen, QFont
 
-from ..constants import DS4Btn, XboxBtn, PS4Btn
-from ..engine.input_mapper import ProfileConfig, AxisConfig, TriggerConfig
-from ..engine.virtual_device import VirtualDeviceType as VDT
 from ..config.profile_manager import ProfileManager
+from ..constants import DS4Btn
+from ..engine.input_mapper import AxisConfig, ProfileConfig, TriggerConfig
+from ..engine.virtual_device import VirtualDeviceType as VDT
 from .color_dialog import ColorDialog
 from .mapping_tab import MappingTabWidget
+from .styles import get_stylesheet
 
 logger = logging.getLogger(__name__)
 
+LED_PRESETS = [
+    ("Ciano", (0, 212, 170)),
+    ("Azul", (0, 90, 255)),
+    ("Roxo", (150, 60, 255)),
+    ("Rosa", (255, 60, 150)),
+    ("Vermelho", (255, 40, 40)),
+    ("Verde", (40, 220, 90)),
+    ("Laranja", (255, 140, 0)),
+    ("Branco", (255, 255, 255)),
+]
+
+
+class _ScrollPage(QScrollArea):
+    """Scrollable page used inside the profile editor tabs."""
+
+    def __init__(self, content: QWidget):
+        super().__init__()
+        self.setWidgetResizable(True)
+        self.setFrameShape(QFrame.NoFrame)
+        self.setWidget(content)
+
 
 class ProfileEditorWindow(QWidget):
-    """
-    Full profile editor window mirroring DS4Windows layout.
-    
-    Structure:
-    - FIXED HEADER: Profile name, Save/Cancel buttons
-    - QTabWidget: Controls | Shift Modifier | Controller Readings
-    - CONTROLS tab: 3 panels (Visual | Mapping List | Quick Settings)
-    - READINGS tab: Live axis/buttons visualization
+    """DS4Windows-style per-controller profile editor.
+
+    Layout::
+
+        Perfil: [nome]  [Salvar] [Cancelar]   [Emular: Xbox/PS4]
+        ┌ Controles | Leituras ┐ ┌ Eixos | Lightbar | Gyro | Outros ┐
+        │  imagem + mapeamentos│ │  configurações avançadas          │
+        └──────────────────────┘ └───────────────────────────────────┘
+        Controle 1 usando o perfil "X"                          [Parar]
     """
 
     save_requested = Signal()
@@ -45,776 +78,731 @@ class ProfileEditorWindow(QWidget):
         self.slot_id = slot_id
         self.slot = slot
         self.profile_manager = profile_manager or ProfileManager()
-        self._current_profile: Optional[ProfileConfig] = None
-        self._raw_event_callback = None
+        self._current_profile: ProfileConfig | None = None
+        self._settings = QSettings("DS4Linux", "DS4Linux")
+        self.setStyleSheet(get_stylesheet())
+
         self._setup_ui()
         self._connect_signals()
         self._load_current_profile()
-        self._connect_raw_events()
 
     # ------------------------------------------------------------------
-    # UI SETUP
+    # UI
     # ------------------------------------------------------------------
     def _setup_ui(self):
-        main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(10, 10, 10, 10)
-        main_layout.setSpacing(10)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(12, 12, 12, 10)
+        root.setSpacing(10)
 
-        # ==================== 1. CABEÇALHO FIXO (Topo) ====================
+        # ---------------- header ----------------
         header = QHBoxLayout()
         header.setSpacing(8)
 
-        header.addWidget(QLabel("Profile Name:"))
+        header.addWidget(QLabel("Perfil:"))
         self.profile_name_edit = QLineEdit()
-        self.profile_name_edit.setPlaceholderText("Enter profile name...")
-        self.profile_name_edit.setMinimumWidth(200)
+        self.profile_name_edit.setPlaceholderText("Nome do perfil...")
+        self.profile_name_edit.setMinimumWidth(180)
         header.addWidget(self.profile_name_edit)
 
-        self.save_btn = QPushButton("Save Profile")
+        self.save_btn = QPushButton("Salvar")
         self.save_btn.setObjectName("primaryButton")
         self.save_btn.clicked.connect(self._save_profile)
         header.addWidget(self.save_btn)
 
-        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn = QPushButton("Cancelar")
         self.cancel_btn.clicked.connect(self._cancel_profile)
         header.addWidget(self.cancel_btn)
 
+        header.addSpacing(12)
+        header.addWidget(QLabel("Emular:"))
+        self.device_type_combo = QComboBox()
+        self.device_type_combo.addItem("Xbox 360", VDT.XBOX)
+        self.device_type_combo.addItem("PlayStation 4", VDT.PS4)
+        header.addWidget(self.device_type_combo)
+
         header.addStretch()
-        main_layout.addLayout(header)
+        self.keep_size_cb = QCheckBox("Manter o tamanho da janela ao fechar")
+        header.addWidget(self.keep_size_cb)
+        root.addLayout(header)
 
-        # ==================== 2. QTabWidget (Coração da interface) ====================
-        self.main_tabs = QTabWidget()
-        self.main_tabs.setDocumentMode(True)
-        main_layout.addWidget(self.main_tabs, 1)
+        # ---------------- body ----------------
+        body = QHBoxLayout()
+        body.setSpacing(12)
 
-        # ---- ABA CONTROLS ----
-        self._create_controls_tab()
+        self.left_tabs = QTabWidget()
+        self.left_tabs.setDocumentMode(True)
+        self.left_tabs.addTab(self._build_controls_tab(), "Controles")
+        self.left_tabs.addTab(self._build_readings_tab(), "Leituras")
+        body.addWidget(self.left_tabs, 3)
 
-        # ---- ABA SHIFT MODIFIER ----
-        shift_widget = QWidget()
-        shift_layout = QVBoxLayout(shift_widget)
-        shift_layout.setContentsMargins(20, 20, 20, 20)
-        shift_label = QLabel("Shift Modifier — Advanced remapping with offsets\n\n"
-                             "Map buttons with directional offsets for combo inputs.")
-        shift_label.setWordWrap(True)
-        shift_layout.addWidget(shift_label)
-        shift_layout.addStretch()
-        self.main_tabs.addTab(shift_widget, "Shift Modifier")
+        self.right_tabs = QTabWidget()
+        self.right_tabs.setDocumentMode(True)
+        self.right_tabs.addTab(_ScrollPage(self._build_axis_tab()), "Eixos")
+        self.right_tabs.addTab(_ScrollPage(self._build_lightbar_tab()), "Lightbar")
+        self.right_tabs.addTab(_ScrollPage(self._build_gyro_tab()), "Gyro")
+        self.right_tabs.addTab(_ScrollPage(self._build_other_tab()), "Outros")
+        body.addWidget(self.right_tabs, 2)
 
-        # ---- ABA CONTROLLER READINGS ----
-        self._create_readings_tab()
+        root.addLayout(body, 1)
+
+        # ---------------- footer ----------------
+        footer = QHBoxLayout()
+        self.status_label = QLabel("")
+        self.status_label.setObjectName("dimLabel")
+        footer.addWidget(self.status_label)
+        footer.addStretch()
+        self.stop_btn = QPushButton("Parar")
+        self.stop_btn.setObjectName("dangerButton")
+        self.stop_btn.setToolTip("Interromper a emulação deste controle")
+        self.stop_btn.clicked.connect(self._stop_controller)
+        footer.addWidget(self.stop_btn)
+        root.addLayout(footer)
 
     # ------------------------------------------------------------------
-    def _create_controls_tab(self):
-        """Create the 3-panel CONTROLS tab."""
-        controls_widget = QWidget()
-        controls_layout = QHBoxLayout(controls_widget)
-        controls_layout.setContentsMargins(8, 8, 8, 8)
-        controls_layout.setSpacing(12)
+    def _build_controls_tab(self) -> QWidget:
+        page = QWidget()
+        layout = QHBoxLayout(page)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(12)
 
-        # ==================== PAINEL ESQUERDO: Visual ====================
-        left_panel = QVBoxLayout()
-        left_panel.setSpacing(10)
+        self.mapping_tab = MappingTabWidget(
+            worker=self.slot.worker if self.slot is not None else None
+        )
+        layout.addWidget(self.mapping_tab, 3)
 
-        # Mapeamento e visualização interativa do controle
-        self.mapping_tab = MappingTabWidget(worker=self.slot._worker if self.slot else None)
-        left_panel.addWidget(self.mapping_tab)
+        side = QVBoxLayout()
+        side.setSpacing(10)
 
-        # Gyro buttons below image
-        gyro_group = QGroupBox("Gyro Controls")
-        gyro_layout = QGridLayout(gyro_group)
-        gyro_layout.setSpacing(4)
-
-        gyro_labels = [
-            ("Tilt Up", -1, 0), ("Tilt Down", 1, 0),
-            ("Tilt Left", 0, -1), ("Tilt Right", 0, 1),
-        ]
-        self.gyro_btns = {}
-        for i, (label, dx, dy) in enumerate(gyro_labels):
-            btn = QPushButton(label)
-            btn.setFixedHeight(28)
-            btn.clicked.connect(lambda checked, d=(dx, dy): self._test_gyro(d))
-            self.gyro_btns[label] = btn
-            row = abs(dy) if dy != 0 else 1
-            col = abs(dx) if dx != 0 else 1
-            gyro_layout.addWidget(btn, row, col)
-
-        left_panel.addWidget(gyro_group)
-
-        controls_layout.addLayout(left_panel, 1)
-
-        # ==================== PAINEL CENTRAL: Mapeamento ====================
-        center_panel = QVBoxLayout()
-        center_panel.setSpacing(8)
-        self._create_mapping_list(center_panel)
-        controls_layout.addLayout(center_panel, 1)
-
-        # ==================== PAINEL DIREITO: Configurações Rápidas ====================
-        right_scroll = QScrollArea()
-        right_scroll.setWidgetResizable(True)
-        right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        right_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-
-        right_content = QWidget()
-        right_layout = QVBoxLayout(right_content)
-        right_layout.setContentsMargins(4, 4, 4, 4)
-        right_layout.setSpacing(10)
-
-        # --- GroupBox: Rumble ---
-        rumble_group = QGroupBox("Rumble")
-        rumble_layout = QFormLayout(rumble_group)
-        rumble_layout.setSpacing(8)
-
-        self.rumble_enable = QCheckBox("Enable Rumble")
-        self.rumble_enable.setChecked(True)
-        rumble_layout.addRow(self.rumble_enable)
-
-        self.rumble_intensity = QSpinBox()
-        self.rumble_intensity.setRange(0, 100)
-        self.rumble_intensity.setValue(100)
-        self.rumble_intensity.setSuffix("%")
-        rumble_layout.addRow("Intensity:", self.rumble_intensity)
-
-        self.rumble_test_btn = QPushButton("Test Rumble")
-        self.rumble_test_btn.clicked.connect(self._test_rumble)
-        rumble_layout.addRow(self.rumble_test_btn)
-
-        right_layout.addWidget(rumble_group)
-
-        # --- GroupBox: Lightbar ---
-        lightbar_group = QGroupBox("Lightbar")
-        lightbar_layout = QFormLayout(lightbar_group)
-        lightbar_layout.setSpacing(8)
-
-        self.lightbar_preview = QLabel("●")
-        self.lightbar_preview.setFixedSize(40, 30)
-        self.lightbar_preview.setStyleSheet("background: #00d4aa; border-radius: 4px;")
-        lightbar_layout.addRow("Color:", self.lightbar_preview)
-
-        self.lightbar_pick_btn = QPushButton("Choose Color")
-        self.lightbar_pick_btn.clicked.connect(self._pick_lightbar_color)
-        lightbar_layout.addRow(self.lightbar_pick_btn)
-
-        self.lightbar_brightness = QSpinBox()
-        self.lightbar_brightness.setRange(0, 255)
-        self.lightbar_brightness.setValue(255)
-        lightbar_layout.addRow("Brightness:", self.lightbar_brightness)
-
-        right_layout.addWidget(lightbar_group)
-
-        # --- GroupBox: Touchpad ---
         touchpad_group = QGroupBox("Touchpad")
-        touchpad_layout = QFormLayout(touchpad_group)
-        touchpad_layout.setSpacing(8)
-
+        touchpad_form = QFormLayout(touchpad_group)
+        touchpad_form.setSpacing(8)
+        self.touchpad_mode = QComboBox()
+        self.touchpad_mode.addItems(["Desativado", "Modo Mouse", "Modo Controles"])
+        touchpad_form.addRow("Modo:", self.touchpad_mode)
         self.touchpad_jitter = QDoubleSpinBox()
         self.touchpad_jitter.setRange(0.0, 1.0)
         self.touchpad_jitter.setSingleStep(0.05)
-        self.touchpad_jitter.setValue(0.0)
-        self.touchpad_jitter.setSuffix("")
-        touchpad_layout.addRow("Jitter Compensation:", self.touchpad_jitter)
+        self.touchpad_jitter.setDecimals(2)
+        touchpad_form.addRow("Jitter:", self.touchpad_jitter)
+        side.addWidget(touchpad_group)
 
-        self.touchpad_mode = QComboBox()
-        self.touchpad_mode.addItems(["Disabled", "Mouse Mode", "Controls Mode"])
-        touchpad_layout.addRow("Mode:", self.touchpad_mode)
+        rumble_group = QGroupBox("Vibração")
+        rumble_form = QFormLayout(rumble_group)
+        rumble_form.setSpacing(8)
+        self.rumble_enable = QCheckBox("Habilitar vibração")
+        self.rumble_enable.setChecked(True)
+        rumble_form.addRow(self.rumble_enable)
+        self.rumble_intensity = QSpinBox()
+        self.rumble_intensity.setRange(0, 100)
+        self.rumble_intensity.setValue(100)
+        self.rumble_intensity.setSuffix(" %")
+        rumble_form.addRow("Intensidade:", self.rumble_intensity)
+        self.rumble_test_btn = QPushButton("Testar vibração")
+        self.rumble_test_btn.clicked.connect(self._test_rumble)
+        rumble_form.addRow(self.rumble_test_btn)
+        side.addWidget(rumble_group)
 
-        right_layout.addWidget(touchpad_group)
-
-        # --- GroupBox: Axis Config (LS/RS) ---
-        axis_group = QGroupBox("Stick Config")
-        axis_layout = QFormLayout(axis_group)
-        axis_layout.setSpacing(8)
-
-        self.ls_deadzone = QDoubleSpinBox()
-        self.ls_deadzone.setRange(0.0, 0.5)
-        self.ls_deadzone.setSingleStep(0.01)
-        self.ls_deadzone.setValue(0.15)
-        self.ls_deadzone.setDecimals(2)
-        axis_layout.addRow("LS Deadzone:", self.ls_deadzone)
-
-        self.rs_deadzone = QDoubleSpinBox()
-        self.rs_deadzone.setRange(0.0, 0.5)
-        self.rs_deadzone.setSingleStep(0.01)
-        self.rs_deadzone.setValue(0.15)
-        self.rs_deadzone.setDecimals(2)
-        axis_layout.addRow("RS Deadzone:", self.rs_deadzone)
-
-        self.ls_sensitivity = QDoubleSpinBox()
-        self.ls_sensitivity.setRange(0.1, 3.0)
-        self.ls_sensitivity.setSingleStep(0.1)
-        self.ls_sensitivity.setValue(1.0)
-        axis_layout.addRow("LS Sensitivity:", self.ls_sensitivity)
-
-        self.rs_sensitivity = QDoubleSpinBox()
-        self.rs_sensitivity.setRange(0.1, 3.0)
-        self.rs_sensitivity.setSingleStep(0.1)
-        self.rs_sensitivity.setValue(1.0)
-        axis_layout.addRow("RS Sensitivity:", self.rs_sensitivity)
-
-        right_layout.addWidget(axis_group)
-
-        # --- GroupBox: Trigger Config ---
-        trigger_group = QGroupBox("Trigger Config")
-        trigger_layout = QFormLayout(trigger_group)
-        trigger_layout.setSpacing(8)
-
-        self.lt_deadzone = QDoubleSpinBox()
-        self.lt_deadzone.setRange(0.0, 0.5)
-        self.lt_deadzone.setSingleStep(0.01)
-        self.lt_deadzone.setValue(0.05)
-        self.lt_deadzone.setDecimals(2)
-        trigger_layout.addRow("L2 Deadzone:", self.lt_deadzone)
-
-        self.rt_deadzone = QDoubleSpinBox()
-        self.rt_deadzone.setRange(0.0, 0.5)
-        self.rt_deadzone.setSingleStep(0.01)
-        self.rt_deadzone.setValue(0.05)
-        self.rt_deadzone.setDecimals(2)
-        trigger_layout.addRow("R2 Deadzone:", self.rt_deadzone)
-
-        right_layout.addWidget(trigger_group)
-
-        right_layout.addStretch()
-        right_scroll.setWidget(right_content)
-        controls_layout.addWidget(right_scroll, 1)
-
-        self.main_tabs.addTab(controls_widget, "Controls")
+        side.addStretch()
+        layout.addLayout(side, 2)
+        return page
 
     # ------------------------------------------------------------------
-    def _create_mapping_list(self, parent_layout: QVBoxLayout):
-        """Build the mapping list with friendly names, context menu, and listen mode."""
-        # Header with Clear All and Remove Selected
-        hdr = QHBoxLayout()
-        hdr.addWidget(QLabel("Button Mappings"))
-        hdr.addStretch()
-        self.clear_mappings_btn = QPushButton("Clear All")
-        self.clear_mappings_btn.setObjectName("dangerButton")
-        self.clear_mappings_btn.clicked.connect(self._clear_mappings)
-        hdr.addWidget(self.clear_mappings_btn)
+    def _build_readings_tab(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
 
-        self.remove_sel_btn = QPushButton("Remover Selecionado")
-        self.remove_sel_btn.setEnabled(False)
-        self.remove_sel_btn.clicked.connect(self._remove_selected_mapping)
-        hdr.addWidget(self.remove_sel_btn)
+        info = QLabel("Pressione botões e mova os analógicos para conferir a leitura ao vivo.")
+        info.setObjectName("dimLabel")
+        info.setWordWrap(True)
+        layout.addWidget(info)
 
-        parent_layout.addLayout(hdr)
+        sticks_group = QGroupBox("Analógicos")
+        sticks = QFormLayout(sticks_group)
+        sticks.setSpacing(8)
 
-        # List widget
-        self.mapping_list = QListWidget()
-        self.mapping_list.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.mapping_list.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.mapping_list.customContextMenuRequested.connect(self._show_mapping_context_menu)
-        self.mapping_list.itemSelectionChanged.connect(
-            lambda: self.remove_sel_btn.setEnabled(bool(self.mapping_list.selectedItems()))
-        )
-        self.mapping_list.itemDoubleClicked.connect(self._edit_mapping_listen)
-        self.mapping_list.setStyleSheet("""
-            QListWidget { background:#1e1e2e; border:1px solid #3a3a5c; border-radius:6px; font-size:12px; }
-            QListWidget::item { padding:6px 10px; border-radius:4px; }
-            QListWidget::item:selected { background:#00d4aa; color:#1e1e2e; }
-        """)
-        parent_layout.addWidget(self.mapping_list)
+        def make_bar(lo, hi):
+            bar = QProgressBar()
+            bar.setRange(lo, hi)
+            bar.setValue(0)
+            bar.setTextVisible(False)
+            bar.setFixedHeight(14)
+            return bar
 
-        # Quick map button
-        self.quick_map_btn = QPushButton("⚡ Quick Map Remaining")
-        self.quick_map_btn.setObjectName("primaryButton")
-        self.quick_map_btn.clicked.connect(self._start_quick_map)
-        parent_layout.addWidget(self.quick_map_btn)
+        self.ls_x_bar = make_bar(-32768, 32767)
+        self.ls_y_bar = make_bar(-32768, 32767)
+        self.rs_x_bar = make_bar(-32768, 32767)
+        self.rs_y_bar = make_bar(-32768, 32767)
+        sticks.addRow("LS X:", self.ls_x_bar)
+        sticks.addRow("LS Y:", self.ls_y_bar)
+        sticks.addRow("RS X:", self.rs_x_bar)
+        sticks.addRow("RS Y:", self.rs_y_bar)
+        layout.addWidget(sticks_group)
 
-    # ------------------------------------------------------------------
-    def _create_readings_tab(self):
-        """Create the CONTROLLER READINGS tab with live visualization."""
-        readings_widget = QWidget()
-        readings_layout = QVBoxLayout(readings_widget)
-        readings_layout.setContentsMargins(20, 20, 20, 20)
-        readings_layout.setSpacing(12)
+        triggers_group = QGroupBox("Gatilhos (L2 / R2)")
+        triggers = QFormLayout(triggers_group)
+        triggers.setSpacing(8)
+        self.l2_bar = make_bar(0, 255)
+        self.r2_bar = make_bar(0, 255)
+        triggers.addRow("L2:", self.l2_bar)
+        triggers.addRow("R2:", self.r2_bar)
+        layout.addWidget(triggers_group)
 
-        readings_layout.addWidget(QLabel("<b>Controller Readings — Live Input Test</b>"))
-        readings_layout.addWidget(QLabel("Press buttons and move sticks to verify input."))
+        buttons_group = QGroupBox("Botões e direcionais")
+        grid = QGridLayout(buttons_group)
+        grid.setSpacing(6)
 
-        # --- Stick axes ---
-        sticks_group = QGroupBox("Analog Sticks")
-        sticks_layout = QFormLayout(sticks_group)
-        sticks_layout.setSpacing(10)
-
-        self.ls_x_bar = QProgressBar()
-        self.ls_x_bar.setRange(-32768, 32767)
-        self.ls_x_bar.setValue(0)
-        self.ls_x_bar.setTextVisible(False)
-        self.ls_x_bar.setFormat("")
-
-        self.ls_y_bar = QProgressBar()
-        self.ls_y_bar.setRange(-32768, 32767)
-        self.ls_y_bar.setValue(0)
-        self.ls_y_bar.setTextVisible(False)
-
-        self.rs_x_bar = QProgressBar()
-        self.rs_x_bar.setRange(-32768, 32767)
-        self.rs_x_bar.setValue(0)
-        self.rs_x_bar.setTextVisible(False)
-
-        self.rs_y_bar = QProgressBar()
-        self.rs_y_bar.setRange(-32768, 32767)
-        self.rs_y_bar.setValue(0)
-        self.rs_y_bar.setTextVisible(False)
-
-        sticks_layout.addRow("Left Stick X:", self.ls_x_bar)
-        sticks_layout.addRow("Left Stick Y:", self.ls_y_bar)
-        sticks_layout.addRow("Right Stick X:", self.rs_x_bar)
-        sticks_layout.addRow("Right Stick Y:", self.rs_y_bar)
-
-        readings_layout.addWidget(sticks_group)
-
-        # --- Triggers ---
-        triggers_group = QGroupBox("Triggers (L2 / R2)")
-        triggers_layout = QFormLayout(triggers_group)
-        triggers_layout.setSpacing(10)
-
-        self.l2_bar = QProgressBar()
-        self.l2_bar.setRange(0, 255)
-        self.l2_bar.setValue(0)
-
-        self.r2_bar = QProgressBar()
-        self.r2_bar.setRange(0, 255)
-        self.r2_bar.setValue(0)
-
-        triggers_layout.addRow("L2:", self.l2_bar)
-        triggers_layout.addRow("R2:", self.r2_bar)
-
-        readings_layout.addWidget(triggers_group)
-
-        # --- Buttons status ---
-        buttons_group = QGroupBox("Button States")
-        buttons_layout = QGridLayout(buttons_group)
-        buttons_layout.setSpacing(6)
-
-        self.btn_states = {}
+        self.btn_states: dict[int, QLabel] = {}
         all_btns = [
-            (DS4Btn.SOUTH, "Cross"), (DS4Btn.EAST, "Circle"),
-            (DS4Btn.NORTH, "Triangle"), (DS4Btn.WEST, "Square"),
+            (DS4Btn.SOUTH, "✕"), (DS4Btn.EAST, "○"),
+            (DS4Btn.NORTH, "△"), (DS4Btn.WEST, "□"),
+            (DS4Btn.DPAD_UP, "↑"), (DS4Btn.DPAD_DOWN, "↓"),
+            (DS4Btn.DPAD_LEFT, "←"), (DS4Btn.DPAD_RIGHT, "→"),
             (DS4Btn.TL, "L1"), (DS4Btn.TR, "R1"),
             (DS4Btn.TL2, "L2"), (DS4Btn.TR2, "R2"),
             (DS4Btn.SELECT, "Share"), (DS4Btn.START, "Options"),
             (DS4Btn.THUMBL, "L3"), (DS4Btn.THUMBR, "R3"),
-            (DS4Btn.PS, "PS"), (DS4Btn.DPAD_UP, "D-Up"),
-            (DS4Btn.DPAD_DOWN, "D-Down"), (DS4Btn.DPAD_LEFT, "D-Left"),
-            (DS4Btn.DPAD_RIGHT, "D-Right"),
+            (DS4Btn.PS, "PS"), (DS4Btn.TOUCHPAD, "Touch"),
         ]
         for i, (code, label) in enumerate(all_btns):
-            row = i // 6
-            col = i % 6
-            lbl = QLabel(label)
-            lbl.setStyleSheet("color: #a0a0b0; font-size: 11px;")
-            state_lbl = QLabel("○")
-            state_lbl.setStyleSheet("font-size: 14px;")
-            state_lbl.setAlignment(Qt.AlignCenter)
-            self.btn_states[code] = state_lbl
-            buttons_layout.addWidget(lbl, row, col * 2)
-            buttons_layout.addWidget(state_lbl, row, col * 2 + 1)
+            row, col = divmod(i, 6)
+            name = QLabel(label)
+            name.setStyleSheet("color:#9aa0b4; font-size:11px;")
+            state = QLabel("○")
+            state.setAlignment(Qt.AlignCenter)
+            state.setStyleSheet("font-size:14px; color:#5a5f73;")
+            self.btn_states[code] = state
+            grid.addWidget(name, row, col * 2)
+            grid.addWidget(state, row, col * 2 + 1)
+        layout.addWidget(buttons_group)
 
-        readings_layout.addWidget(buttons_group)
-
-        # Connection label
-        conn_lbl = QLabel("Connected: No controller")
-        conn_lbl.setStyleSheet("color: #ff6b6b; font-weight: bold;")
-        readings_layout.addWidget(conn_lbl)
-        self.connection_status = conn_lbl
-
-        readings_layout.addStretch()
-
-        self.main_tabs.addTab(readings_widget, "Controller Readings")
+        self.connection_status = QLabel("Conectado: nenhum controle")
+        self.connection_status.setStyleSheet("color:#ff6b6b; font-weight:bold;")
+        layout.addWidget(self.connection_status)
+        layout.addStretch()
+        return page
 
     # ------------------------------------------------------------------
-    # IMAGE LOADING
-    # ------------------------------------------------------------------
-    def _load_controller_image(self):
-        """Load the controller image for the visual panel."""
-        image_paths = [
-            Path(__file__).parent.parent.parent / "assets" / "joystick.png",
-            Path(__file__).parent.parent.parent / "assets" / "controller.png",
-            Path("/home/servidor/Git/Ds4linux/assets/joystick.png"),
-        ]
-        loaded = False
-        for path in image_paths:
-            if path.exists():
-                pixmap = QPixmap(str(path))
-                if not pixmap.isNull():
-                    self.controller_image_label.setPixmap(
-                        pixmap.scaled(320, 380, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                    )
-                    loaded = True
-                    logger.info(f"Loaded controller image: {path}")
-                    break
-        if not loaded:
-            # Draw fallback
-            pixmap = QPixmap(320, 380)
-            pixmap.fill(Qt.transparent)
-            painter = QPainter(pixmap)
-            painter.setRenderHint(QPainter.Antialiasing)
-            painter.setPen(QPen(QColor("#555560"), 2))
-            painter.setBrush(QBrush(QColor("#2a2a3e")))
-            painter.drawRoundedRect(40, 30, 240, 300, 40, 40)
-            painter.end()
-            self.controller_image_label.setPixmap(pixmap)
+    def _build_axis_tab(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(12)
+
+        sticks_group = QGroupBox("Analógicos (LS / RS)")
+        grid = QGridLayout(sticks_group)
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(8)
+        grid.addWidget(self._header_label(""), 0, 0)
+        grid.addWidget(self._header_label("LS"), 0, 1)
+        grid.addWidget(self._header_label("RS"), 0, 2)
+
+        self.ls_deadzone = self._double(0.0, 0.99, 0.15)
+        self.rs_deadzone = self._double(0.0, 0.99, 0.15)
+        self._grid_row(grid, 1, "Dead Zone:", self.ls_deadzone, self.rs_deadzone)
+
+        self.ls_maxzone = self._double(0.1, 1.0, 1.0)
+        self.rs_maxzone = self._double(0.1, 1.0, 1.0)
+        self._grid_row(grid, 2, "Max Zone:", self.ls_maxzone, self.rs_maxzone)
+
+        self.ls_antideadzone = self._double(0.0, 0.99, 0.0)
+        self.rs_antideadzone = self._double(0.0, 0.99, 0.0)
+        self._grid_row(grid, 3, "Anti-dead Zone:", self.ls_antideadzone, self.rs_antideadzone)
+
+        self.ls_sensitivity = self._double(0.1, 5.0, 1.0)
+        self.rs_sensitivity = self._double(0.1, 5.0, 1.0)
+        self._grid_row(grid, 4, "Sensitivity:", self.ls_sensitivity, self.rs_sensitivity)
+
+        self.ls_curve = QComboBox()
+        self.rs_curve = QComboBox()
+        for combo in (self.ls_curve, self.rs_curve):
+            combo.addItems(["Linear", "Exponential", "Quadratic"])
+        self._grid_row(grid, 5, "Output Curve:", self.ls_curve, self.rs_curve)
+
+        self.ls_square = QCheckBox()
+        self.rs_square = QCheckBox()
+        self._grid_row(grid, 6, "Square Stick:", self.ls_square, self.rs_square)
+
+        self.ls_square_value = self._double(0.0, 50.0, 5.0, suffix=" %")
+        self.rs_square_value = self._double(0.0, 50.0, 5.0, suffix=" %")
+        self._grid_row(grid, 7, "Square Value:", self.ls_square_value, self.rs_square_value)
+
+        self.ls_rotation = QSpinBox()
+        self.rs_rotation = QSpinBox()
+        for spin in (self.ls_rotation, self.rs_rotation):
+            spin.setRange(-180, 180)
+            spin.setSuffix(" °")
+        self._grid_row(grid, 8, "Rotation:", self.ls_rotation, self.rs_rotation)
+
+        self.ls_inverted = QCheckBox()
+        self.rs_inverted = QCheckBox()
+        self._grid_row(grid, 9, "Invertido:", self.ls_inverted, self.rs_inverted)
+        layout.addWidget(sticks_group)
+
+        triggers_group = QGroupBox("Gatilhos (L2 / R2)")
+        tgrid = QGridLayout(triggers_group)
+        tgrid.setHorizontalSpacing(10)
+        tgrid.setVerticalSpacing(8)
+        tgrid.addWidget(self._header_label(""), 0, 0)
+        tgrid.addWidget(self._header_label("L2"), 0, 1)
+        tgrid.addWidget(self._header_label("R2"), 0, 2)
+
+        self.lt_deadzone = self._double(0.0, 0.99, 0.05)
+        self.rt_deadzone = self._double(0.0, 0.99, 0.05)
+        self._grid_row(tgrid, 1, "Dead Zone:", self.lt_deadzone, self.rt_deadzone)
+
+        self.lt_maxzone = self._double(0.1, 1.0, 1.0)
+        self.rt_maxzone = self._double(0.1, 1.0, 1.0)
+        self._grid_row(tgrid, 2, "Max Zone:", self.lt_maxzone, self.rt_maxzone)
+
+        self.lt_antideadzone = self._double(0.0, 0.99, 0.0)
+        self.rt_antideadzone = self._double(0.0, 0.99, 0.0)
+        self._grid_row(tgrid, 3, "Anti-dead Zone:", self.lt_antideadzone, self.rt_antideadzone)
+
+        self.lt_sensitivity = self._double(0.1, 5.0, 1.0)
+        self.rt_sensitivity = self._double(0.1, 5.0, 1.0)
+        self._grid_row(tgrid, 4, "Sensitivity:", self.lt_sensitivity, self.rt_sensitivity)
+        layout.addWidget(triggers_group)
+
+        layout.addStretch()
+        return page
+
+    @staticmethod
+    def _header_label(text: str) -> QLabel:
+        label = QLabel(text)
+        label.setObjectName("columnHeader")
+        label.setAlignment(Qt.AlignCenter)
+        return label
+
+    @staticmethod
+    def _double(lo, hi, value, suffix="", step=0.01) -> QDoubleSpinBox:
+        spin = QDoubleSpinBox()
+        spin.setRange(lo, hi)
+        spin.setSingleStep(step)
+        spin.setDecimals(2)
+        spin.setValue(value)
+        if suffix:
+            spin.setSuffix(suffix)
+        spin.setMaximumWidth(110)
+        return spin
+
+    @staticmethod
+    def _grid_row(grid: QGridLayout, row: int, label: str, left, right):
+        text = QLabel(label)
+        grid.addWidget(text, row, 0)
+        grid.addWidget(left, row, 1)
+        grid.addWidget(right, row, 2)
 
     # ------------------------------------------------------------------
-    # SIGNALS
+    def _build_lightbar_tab(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(12)
+
+        color_group = QGroupBox("Cor")
+        color_layout = QVBoxLayout(color_group)
+        color_layout.setSpacing(10)
+
+        self.lightbar_preview = QLabel()
+        self.lightbar_preview.setFixedHeight(42)
+        self.lightbar_preview.setStyleSheet(
+            "background:#00d4aa; border-radius:8px; border:1px solid #3a3a5c;"
+        )
+        color_layout.addWidget(self.lightbar_preview)
+
+        self.lightbar_pick_btn = QPushButton("Escolher cor...")
+        self.lightbar_pick_btn.clicked.connect(self._pick_lightbar_color)
+        color_layout.addWidget(self.lightbar_pick_btn)
+
+        presets = QGridLayout()
+        self._preset_buttons = []
+        for i, (name, rgb) in enumerate(LED_PRESETS):
+            btn = QPushButton(name)
+            btn.setFixedHeight(26)
+            btn.setStyleSheet(
+                f"QPushButton {{ background: rgb({rgb[0]},{rgb[1]},{rgb[2]});"
+                " color: #101018; font-weight: bold; border-radius: 6px; }"
+            )
+            btn.clicked.connect(lambda _c=False, c=rgb: self._set_led_color(c))
+            presets.addWidget(btn, i // 4, i % 4)
+            self._preset_buttons.append(btn)
+        color_layout.addLayout(presets)
+        layout.addWidget(color_group)
+
+        brightness_group = QGroupBox("Brilho")
+        brightness_layout = QVBoxLayout(brightness_group)
+        row = QHBoxLayout()
+        self.lightbar_brightness = QSlider(Qt.Horizontal)
+        self.lightbar_brightness.setRange(0, 255)
+        self.lightbar_brightness.setValue(255)
+        self.lightbar_brightness_label = QLabel("255")
+        self.lightbar_brightness.valueChanged.connect(
+            lambda v: self.lightbar_brightness_label.setText(str(v))
+        )
+        row.addWidget(self.lightbar_brightness, 1)
+        row.addWidget(self.lightbar_brightness_label)
+        brightness_layout.addLayout(row)
+        layout.addWidget(brightness_group)
+
+        layout.addStretch()
+        return page
+
+    # ------------------------------------------------------------------
+    def _build_gyro_tab(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(12)
+
+        group = QGroupBox("Giroscópio")
+        form = QFormLayout(group)
+        form.setSpacing(8)
+        self.gyro_enable = QCheckBox("Habilitar giroscópio")
+        form.addRow(self.gyro_enable)
+        self.gyro_mode = QComboBox()
+        self.gyro_mode.addItems(["Desativado", "Mouse", "Mouse (só ao mirar)"])
+        form.addRow("Modo:", self.gyro_mode)
+        self.gyro_sensitivity = self._double(0.1, 10.0, 1.0)
+        form.addRow("Sensibilidade:", self.gyro_sensitivity)
+        self.gyro_calibrate_btn = QPushButton("Calibrar")
+        form.addRow(self.gyro_calibrate_btn)
+        layout.addWidget(group)
+        layout.addStretch()
+        return page
+
+    # ------------------------------------------------------------------
+    def _build_other_tab(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(12)
+
+        led_group = QGroupBox("Comportamento do LED")
+        led_layout = QFormLayout(led_group)
+        led_layout.setSpacing(8)
+        self.led_mode = QComboBox()
+        self.led_mode.addItems([
+            "Cor fixa do perfil",
+            "Indicador de bateria",
+            "Pulsar",
+            "Arco-íris",
+        ])
+        led_layout.addRow("Modo:", self.led_mode)
+        layout.addWidget(led_group)
+
+        conn_group = QGroupBox("Conexão")
+        conn_layout = QFormLayout(conn_group)
+        conn_layout.setSpacing(8)
+        self.auto_reconnect = QCheckBox("Reconectar automaticamente")
+        self.auto_reconnect.setChecked(True)
+        conn_layout.addRow(self.auto_reconnect)
+        self.poll_rate = QComboBox()
+        self._poll_values = [1, 2, 4, 10]
+        self.poll_rate.addItems([
+            "1 ms (1000 Hz)", "2 ms (500 Hz)", "4 ms (250 Hz)", "10 ms (100 Hz)",
+        ])
+        conn_layout.addRow("Polling:", self.poll_rate)
+        layout.addWidget(conn_group)
+
+        layout.addStretch()
+        return page
+
+    # ------------------------------------------------------------------
+    # Signals
     # ------------------------------------------------------------------
     def _connect_signals(self):
+        self.device_type_combo.currentIndexChanged.connect(self._on_device_type_changed)
         self.lightbar_brightness.valueChanged.connect(self._on_lightbar_brightness)
-        self.touchpad_jitter.valueChanged.connect(self._on_touchpad_jitter)
-        self.touchpad_mode.currentIndexChanged.connect(self._on_touchpad_mode)
-        self.rumble_intensity.valueChanged.connect(self._on_rumble_intensity)
-        self.rumble_enable.toggled.connect(self._on_rumble_enable)
-
-    def _connect_raw_events(self):
-        """Connect to worker thread raw_event signal for live readings."""
-        if hasattr(self.slot, '_worker') and self.slot._worker:
-            self.slot._worker.raw_event.connect(self._on_raw_event)
-            logger.info(f"Slot {self.slot_id}: Connected raw_event signal to readings")
-
-    # ------------------------------------------------------------------
-    # FRIENDLY NAME TRANSLATION
-    # ------------------------------------------------------------------
-    _FRIENDLY_NAME = {
-        # axes / hat
-        "ABS_HAT0X": "Eixo D‑Pad X",
-        "ABS_HAT0Y": "Eixo D‑Pad Y",
-        # buttons (evdev names)
-        "BTN_SOUTH":   "✕  /  A",
-        "BTN_EAST":    "◯  /  B",
-        "BTN_NORTH":   "△  /  Y",
-        "BTN_WEST":    "□  /  X",
-        "BTN_TL":      "L1  /  LB",
-        "BTN_TR":      "R1  /  RB",
-        "BTN_Z":       "L2  /  LT",
-        "BTN_TX":      "R2  /  RT",
-        "BTN_SELECT":  "Share / Back",
-        "BTN_START":   "Options / Start",
-        "BTN_MODE":    "PS / Guide",
-        "BTN_THUMBL":  "L3",
-        "BTN_THUMBR":  "R3",
-        "BTN_DPAD_UP":    "Seta ↑",
-        "BTN_DPAD_DOWN":  "Seta ↓",
-        "BTN_DPAD_LEFT":  "Seta ←",
-        "BTN_DPAD_RIGHT": "Seta →",
-    }
-
-    def _friendly(self, code: int) -> str:
-        """Return human‑readable name for an evdev code; fallback to hex."""
-        from evdev import ecodes as e
-        name = e.KEY.get(code) or e.BTN.get(code) or e.ABS.get(code) or f"0x{code:03X}"
-        return self._FRIENDLY_NAME.get(name, name)
+        self.gyro_calibrate_btn.clicked.connect(
+            lambda: QMessageBox.information(self, "Gyro", "Calibração registrada.")
+        )
+        worker = self.slot.worker if self.slot is not None else None
+        if worker is not None:
+            try:
+                worker.raw_event.connect(self._on_raw_event)
+                self._raw_worker = worker
+            except Exception:
+                logger.debug("Could not connect worker.raw_event", exc_info=True)
 
     # ------------------------------------------------------------------
-    # PROFILE LOADING / SAVING
+    # Profile load/save
     # ------------------------------------------------------------------
     def _load_current_profile(self):
-        prof_name = self.profile_manager.get_current_profile_name() or "Default"
-        self._current_profile = self.profile_manager.load_profile(prof_name)
-        self.profile_name_edit.setText(prof_name)
+        name = self.profile_manager.get_current_profile_name() or "Default"
+        self._current_profile = self.profile_manager.load_profile(name)
+        if not self._current_profile:
+            self._current_profile = ProfileConfig(name="Default")
+        self.profile_name_edit.setText(self._current_profile.name)
         self._apply_profile_to_ui()
 
     def _apply_profile_to_ui(self):
-        if not self._current_profile:
+        profile = self._current_profile
+        if not profile:
             return
 
-        # Apply button mappings to list
-        self._update_mapping_list()
+        # Keep the combo quiet while we sync it
+        self.device_type_combo.blockSignals(True)
+        idx = self.device_type_combo.findData(profile.device_type)
+        if idx >= 0:
+            self.device_type_combo.setCurrentIndex(idx)
+        self.device_type_combo.blockSignals(False)
 
-        # Apply axis config
-        ls, rs = self._current_profile.left_stick, self._current_profile.right_stick
-        lt, rt = self._current_profile.left_trigger, self._current_profile.right_trigger
-        self.ls_deadzone.setValue(ls.deadzone)
-        self.rs_deadzone.setValue(rs.deadzone)
-        self.ls_sensitivity.setValue(ls.sensitivity)
-        self.rs_sensitivity.setValue(rs.sensitivity)
-        self.lt_deadzone.setValue(lt.deadzone)
-        self.rt_deadzone.setValue(rt.deadzone)
+        self.mapping_tab.set_device_type(profile.device_type)
+        self.mapping_tab.set_mappings(profile.button_maps)
 
-        # Apply lightbar
-        color = QColor(*self._current_profile.led_color)
-        self.lightbar_preview.setStyleSheet(
-            f"background: {color.name()}; border-radius: 4px; border: 1px solid #3a3a5c;"
-        )
-        self.lightbar_brightness.setValue(self._current_profile.led_brightness)
+        self._fill_axis_widgets(profile.left_stick, self.ls_deadzone, self.ls_maxzone,
+                                self.ls_antideadzone, self.ls_sensitivity, self.ls_curve,
+                                self.ls_square, self.ls_square_value, self.ls_rotation,
+                                self.ls_inverted)
+        self._fill_axis_widgets(profile.right_stick, self.rs_deadzone, self.rs_maxzone,
+                                self.rs_antideadzone, self.rs_sensitivity, self.rs_curve,
+                                self.rs_square, self.rs_square_value, self.rs_rotation,
+                                self.rs_inverted)
+        self._fill_trigger_widgets(profile.left_trigger, self.lt_deadzone, self.lt_maxzone,
+                                   self.lt_antideadzone, self.lt_sensitivity)
+        self._fill_trigger_widgets(profile.right_trigger, self.rt_deadzone, self.rt_maxzone,
+                                   self.rt_antideadzone, self.rt_sensitivity)
 
-        # Update rumble
-        self.rumble_enable.setChecked(True)
-        self.rumble_intensity.setValue(100)
+        self._set_led_color(profile.led_color, update_profile=False)
+        self.lightbar_brightness.setValue(profile.led_brightness)
+        poll_index = self._poll_values.index(profile.poll_rate_ms) \
+            if profile.poll_rate_ms in self._poll_values else len(self._poll_values) - 1
+        self.poll_rate.setCurrentIndex(poll_index)
 
-        # Update touchpad
-        self.touchpad_mode.setCurrentIndex(1)  # Mouse mode default
-        self.touchpad_jitter.setValue(0.0)
+        self._update_status_label()
+
+    @staticmethod
+    def _fill_axis_widgets(cfg: AxisConfig, deadzone, maxzone, antideadzone,
+                           sensitivity, curve, square, square_value, rotation, inverted):
+        deadzone.setValue(cfg.deadzone)
+        maxzone.setValue(cfg.max_zone)
+        antideadzone.setValue(cfg.anti_deadzone)
+        sensitivity.setValue(cfg.sensitivity)
+        index = curve.findText(cfg.output_curve)
+        curve.setCurrentIndex(index if index >= 0 else 0)
+        square.setChecked(cfg.square_stick)
+        square_value.setValue(cfg.square_stick_value)
+        rotation.setValue(cfg.rotation)
+        inverted.setChecked(cfg.inverted)
+
+    @staticmethod
+    def _fill_trigger_widgets(cfg: TriggerConfig, deadzone, maxzone, antideadzone, sensitivity):
+        deadzone.setValue(cfg.deadzone)
+        maxzone.setValue(cfg.max_zone)
+        antideadzone.setValue(cfg.anti_deadzone)
+        sensitivity.setValue(cfg.sensitivity)
 
     def _save_profile(self):
         name = self.profile_name_edit.text().strip()
         if not name:
-            QMessageBox.warning(self, "Empty Name", "Please enter a profile name.")
+            QMessageBox.warning(self, "Nome vazio", "Informe um nome para o perfil.")
             return
 
-        # Build profile from UI values
-        if not self._current_profile:
-            self._current_profile = ProfileConfig(name=name)
+        profile = self._current_profile or ProfileConfig(name=name)
+        profile.name = name
+        profile.device_type = self.device_type_combo.currentData() or VDT.XBOX
+        profile.button_maps = self.mapping_tab.get_mappings()
 
-        self._current_profile.name = name
-        self._current_profile.device_type = VDT(
-            self.slot._virtual_device.device_type.value if self.slot._virtual_device else "xbox"
-        )
-
-        # Collect mappings from list
-        mappings = {}
-        for i in range(self.mapping_list.count()):
-            item = self.mapping_list.item(i)
-            ds4_code = item.data(Qt.UserRole)
-            if ds4_code is not None:
-                # Extract virt code from text
-                text = item.text()
-                if "→" in text:
-                    virt_name = text.split("→")[1].strip()
-                    # Try to find virt code
-                    for enum_cls in (XboxBtn, PS4Btn):
-                        try:
-                            mappings[ds4_code] = enum_cls[virt_name].value
-                            break
-                        except KeyError:
-                            continue
-        self._current_profile.button_maps = mappings
-
-        # Axis config
-        self._current_profile.left_stick = AxisConfig(
+        profile.left_stick = AxisConfig(
             deadzone=self.ls_deadzone.value(),
+            max_zone=self.ls_maxzone.value(),
+            anti_deadzone=self.ls_antideadzone.value(),
             sensitivity=self.ls_sensitivity.value(),
+            output_curve=self.ls_curve.currentText(),
+            square_stick=self.ls_square.isChecked(),
+            square_stick_value=self.ls_square_value.value(),
+            rotation=self.ls_rotation.value(),
+            inverted=self.ls_inverted.isChecked(),
         )
-        self._current_profile.right_stick = AxisConfig(
+        profile.right_stick = AxisConfig(
             deadzone=self.rs_deadzone.value(),
+            max_zone=self.rs_maxzone.value(),
+            anti_deadzone=self.rs_antideadzone.value(),
             sensitivity=self.rs_sensitivity.value(),
+            output_curve=self.rs_curve.currentText(),
+            square_stick=self.rs_square.isChecked(),
+            square_stick_value=self.rs_square_value.value(),
+            rotation=self.rs_rotation.value(),
+            inverted=self.rs_inverted.isChecked(),
         )
-        self._current_profile.left_trigger = TriggerConfig(
+        profile.left_trigger = TriggerConfig(
             deadzone=self.lt_deadzone.value(),
+            max_zone=self.lt_maxzone.value(),
+            anti_deadzone=self.lt_antideadzone.value(),
+            sensitivity=self.lt_sensitivity.value(),
         )
-        self._current_profile.right_trigger = TriggerConfig(
+        profile.right_trigger = TriggerConfig(
             deadzone=self.rt_deadzone.value(),
+            max_zone=self.rt_maxzone.value(),
+            anti_deadzone=self.rt_antideadzone.value(),
+            sensitivity=self.rt_sensitivity.value(),
         )
+        profile.led_brightness = self.lightbar_brightness.value()
+        profile.poll_rate_ms = self._poll_values[self.poll_rate.currentIndex()]
+        self._current_profile = profile
 
-        # LED
-        self._current_profile.led_color = (
-            self.lightbar_preview.styleSheet().split("#")[1][:6] if "#" in self.lightbar_preview.styleSheet()
-            else (0, 212, 170)
-        )
-        self._current_profile.led_brightness = self.lightbar_brightness.value()
+        if not self.profile_manager.save_profile(name, profile):
+            QMessageBox.critical(self, "Erro", "Não foi possível salvar o perfil.")
+            return
 
-        # Save
-        self.profile_manager.save_profile(name, self._current_profile)
+        if self.slot is not None:
+            self.slot.set_profile(profile)
+
         self.profile_saved.emit(name)
         self.save_requested.emit()
-        logger.info(f"Profile saved: {name}")
+        self._update_status_label()
+        logger.info("Profile saved: %s", name)
 
     def _cancel_profile(self):
         self._load_current_profile()
         logger.info("Profile edit cancelled")
 
-    # ------------------------------------------------------------------
-    # MAPPING LIST
-    # ------------------------------------------------------------------
-    def _update_mapping_list(self):
-        """Populate the mapping list from current profile using friendly names."""
-        self.mapping_list.clear()
-        btn_names = {}
-        for enum_cls in (DS4Btn, XboxBtn, PS4Btn):
-            for member in enum_cls:
-                btn_names[member.value] = member.name
+    def _on_device_type_changed(self):
+        device_type = self.device_type_combo.currentData()
+        if not device_type:
+            return
+        self.mapping_tab.set_device_type(device_type)
+        if self.slot is not None and self.slot.virtual_device is not None:
+            self.slot.virtual_device.set_device_type(device_type)
 
-        mappings = self._current_profile.button_maps if self._current_profile else {}
-        for ds4_code, virt_code in sorted(mappings.items()):
-            ds4_disp = self._friendly(ds4_code)
-            virt_disp = self._friendly(virt_code)
-            item = QListWidgetItem(f"{ds4_disp}  →  {virt_disp}")
-            item.setData(Qt.UserRole, ds4_code)          # guarda código técnico
-            self.mapping_list.addItem(item)
+    def _set_led_color(self, rgb, update_profile=True):
+        color = QColor(*rgb)
+        self.lightbar_preview.setStyleSheet(
+            f"background:{color.name()}; border-radius:8px; border:1px solid #3a3a5c;"
+        )
+        if update_profile and self._current_profile:
+            self._current_profile.led_color = (color.red(), color.green(), color.blue())
+        if self.slot is not None and hasattr(self.slot, "set_led_color"):
+            try:
+                self.slot.set_led_color(color.red(), color.green(), color.blue())
+            except Exception:
+                logger.debug("Failed to push LED color to slot", exc_info=True)
 
-    def _clear_mappings(self):
+    def _pick_lightbar_color(self):
+        current = QColor(*(self._current_profile.led_color if self._current_profile else (0, 212, 170)))
+        color = ColorDialog.get_color_static(current, self)
+        if color.isValid():
+            self._set_led_color((color.red(), color.green(), color.blue()))
+
+    def _on_lightbar_brightness(self, value: int):
         if self._current_profile:
-            self._current_profile.button_maps.clear()
-        self._update_mapping_list()
-        logger.info("All mappings cleared")
+            self._current_profile.led_brightness = value
 
     # ------------------------------------------------------------------
-    # MAPPING LIST INTERACTIONS
+    # Live readings
     # ------------------------------------------------------------------
-    def _show_mapping_context_menu(self, pos):
-        item = self.mapping_list.itemAt(pos)
-        if not item:
-            return
-        menu = QMenu(self)
-        del_act = menu.addAction("Excluir Mapeamento")
-        del_act.triggered.connect(lambda: self._delete_mapping_item(item))
-        menu.exec(self.mapping_list.mapToGlobal(pos))
-
-    def _remove_selected_mapping(self):
-        for item in self.mapping_list.selectedItems():
-            self._delete_mapping_item(item)
-
-    def _delete_mapping_item(self, item: QListWidgetItem):
-        ds4_code = item.data(Qt.UserRole)
-        if ds4_code is not None and self._current_profile:
-            self._current_profile.button_maps.pop(ds4_code, None)
-        self.mapping_list.takeItem(self.mapping_list.row(item))
-
-    def _edit_mapping_listen(self, item: QListWidgetItem):
-        ds4_code = item.data(Qt.UserRole)
-        if ds4_code is None:
-            return
-        from .mapping_tab import ListenDialog
-        dlg = ListenDialog(self)
-        dlg.setWindowTitle(f"Mapear: {self._friendly(ds4_code)}")
-        dlg.result.connect(lambda code, val: self._on_listen_result(ds4_code, code, val))
-        dlg.exec()
-
-    def _on_listen_result(self, original_ds4: int, new_code: int, value: int):
-        if value != 1:
-            return
-        if self._current_profile:
-            self._current_profile.button_maps[original_ds4] = new_code
-        self._update_mapping_list()
-
-    def _start_quick_map(self):
-        """Start quick mapping for unmapped buttons."""
-        if not self._current_profile:
-            return
-        all_codes = [btn_def[0] for btn_def in [
-            (DS4Btn.SOUTH, "Cross"), (DS4Btn.EAST, "Circle"),
-            (DS4Btn.NORTH, "Triangle"), (DS4Btn.WEST, "Square"),
-            (DS4Btn.TL, "L1"), (DS4Btn.TR, "R1"),
-            (DS4Btn.TL2, "L2"), (DS4Btn.TR2, "R2"),
-            (DS4Btn.SELECT, "Share"), (DS4Btn.START, "Options"),
-            (DS4Btn.THUMBL, "L3"), (DS4Btn.THUMBR, "R3"),
-            (DS4Btn.PS, "PS"),
-            (DS4Btn.DPAD_UP, "D-Up"), (DS4Btn.DPAD_DOWN, "D-Down"),
-            (DS4Btn.DPAD_LEFT, "D-Left"), (DS4Btn.DPAD_RIGHT, "D-Right"),
-        ]]
-        unmapped = [c for c in all_codes if c not in (self._current_profile.button_maps or {})]
-        if not unmapped:
-            QMessageBox.information(self, "Complete", "All buttons already mapped!")
-            return
-        QMessageBox.information(self, "Quick Map",
-            "Click on buttons in the controller visual to map them.\n"
-            "Press each physical button when prompted.")
-
-    # ------------------------------------------------------------------
-    # LIVE READINGS
-    # ------------------------------------------------------------------
-    @staticmethod
-    def update_readings(event_data: dict):
-        """
-        Static method to update readings from external sources.
-        Called by WorkerThread via signal connection.
-        
-        event_data format:
-        {
-            'ls_x': int, 'ls_y': int,
-            'rs_x': int, 'rs_y': int,
-            'l2': int, 'r2': int,
-            'buttons': {code: pressed}
-        }
-        """
-        # This is called by the worker thread to update the readings tab
-        pass
-
     def _on_raw_event(self, event_type: int, code: int, value: int):
-        """Route raw events from worker thread to readings and mapping."""
         from evdev import ecodes as e
 
-        # Update button states (always)
         if event_type == e.EV_KEY:
-            ds4_codes = {
+            ds4_code = {
                 e.BTN_SOUTH: DS4Btn.SOUTH, e.BTN_EAST: DS4Btn.EAST,
                 e.BTN_NORTH: DS4Btn.NORTH, e.BTN_WEST: DS4Btn.WEST,
                 e.BTN_TL: DS4Btn.TL, e.BTN_TR: DS4Btn.TR,
                 e.BTN_THUMBL: DS4Btn.THUMBL, e.BTN_THUMBR: DS4Btn.THUMBR,
                 e.BTN_START: DS4Btn.START, e.BTN_SELECT: DS4Btn.SELECT,
                 e.BTN_MODE: DS4Btn.PS,
+                e.BTN_TOUCH: DS4Btn.TOUCHPAD,
                 e.BTN_DPAD_UP: DS4Btn.DPAD_UP, e.BTN_DPAD_DOWN: DS4Btn.DPAD_DOWN,
                 e.BTN_DPAD_LEFT: DS4Btn.DPAD_LEFT, e.BTN_DPAD_RIGHT: DS4Btn.DPAD_RIGHT,
+            }.get(code)
+            if ds4_code is not None:
+                self._set_button_state(ds4_code, value == 1)
+
+        elif event_type == e.EV_ABS:
+            if code in (e.ABS_HAT0X, e.ABS_HAT0Y):
+                if code == e.ABS_HAT0X:
+                    self._hat_x = value
+                else:
+                    self._hat_y = value
+                self._set_button_state(DS4Btn.DPAD_LEFT, self._hat_x < 0)
+                self._set_button_state(DS4Btn.DPAD_RIGHT, self._hat_x > 0)
+                self._set_button_state(DS4Btn.DPAD_UP, self._hat_y < 0)
+                self._set_button_state(DS4Btn.DPAD_DOWN, self._hat_y > 0)
+                return
+
+            bars = {
+                e.ABS_X: self.ls_x_bar, e.ABS_Y: self.ls_y_bar,
+                e.ABS_RX: self.rs_x_bar, e.ABS_RY: self.rs_y_bar,
+                e.ABS_Z: self.l2_bar, e.ABS_RZ: self.r2_bar,
             }
-            if code in ds4_codes:
-                ds4_code = ds4_codes[code]
-                if ds4_code in self.btn_states:
-                    state_lbl = self.btn_states[ds4_code]
-                    state_lbl.setText("●" if value == 1 else "○")
-                    state_lbl.setStyleSheet(
-                        "font-size: 14px; color: #00d4aa;" if value == 1 else "font-size: 14px;"
-                    )
+            bar = bars.get(code)
+            if bar is not None:
+                if code in (e.ABS_X, e.ABS_Y, e.ABS_RX, e.ABS_RY) and -255 <= value <= 255:
+                    value = int((value - 128) * 258)
+                bar.setValue(max(bar.minimum(), min(bar.maximum(), value)))
 
-        # Update axis readings (only if readings tab is visible)
-        if self.main_tabs.currentIndex() == 2:  # Controller Readings tab
-            if event_type == e.EV_ABS:
-                abs_map = {
-                    e.ABS_X: (self.ls_x_bar, value),
-                    e.ABS_Y: (self.ls_y_bar, value),
-                    e.ABS_RX: (self.rs_x_bar, value),
-                    e.ABS_RY: (self.rs_y_bar, value),
-                    e.ABS_Z: (self.l2_bar, max(0, value)),
-                    e.ABS_RZ: (self.r2_bar, max(0, value)),
-                }
-                for bar, val in abs_map.values():
-                    bar.setValue(val)
+    _hat_x = 0
+    _hat_y = 0
 
-    # ------------------------------------------------------------------
-    # EVENT HANDLERS
-    # ------------------------------------------------------------------
-    def _pick_lightbar_color(self):
-        color = ColorDialog.get_color_static(
-            QColor(*self._current_profile.led_color) if self._current_profile else QColor(0, 212, 170),
-            self
+    def _set_button_state(self, code: int, pressed: bool):
+        label = self.btn_states.get(code)
+        if label is None:
+            return
+        label.setText("●" if pressed else "○")
+        label.setStyleSheet(
+            "font-size:14px; color:#00d4aa;" if pressed
+            else "font-size:14px; color:#5a5f73;"
         )
-        if color.isValid():
-            self.lightbar_preview.setStyleSheet(
-                f"background: {color.name()}; border-radius: 4px; border: 1px solid #3a3a5c;"
-            )
-            if self._current_profile:
-                self._current_profile.led_color = (color.red(), color.green(), color.blue())
 
-    def _on_lightbar_brightness(self, val: int):
-        if self._current_profile:
-            self._current_profile.led_brightness = val
+    def set_connected(self, connected: bool, device_name: str = ""):
+        if connected:
+            self.connection_status.setText(f"Conectado: {device_name or 'controle'}")
+            self.connection_status.setStyleSheet("color:#6bff6b; font-weight:bold;")
+        else:
+            self.connection_status.setText("Conectado: nenhum controle")
+            self.connection_status.setStyleSheet("color:#ff6b6b; font-weight:bold;")
 
-    def _on_touchpad_jitter(self, val: float):
-        if self._current_profile:
-            pass  # Store for future use
+    def _update_status_label(self):
+        name = self._current_profile.name if self._current_profile else "?"
+        self.status_label.setText(
+            f"Controle {self.slot_id + 1} usando o perfil \"{name}\""
+        )
 
-    def _on_touchpad_mode(self, idx: int):
-        if self._current_profile:
-            pass  # Store for future use
-
-    def _on_rumble_intensity(self, val: int):
-        pass
-
-    def _on_rumble_enable(self, checked: bool):
-        pass
-
+    # ------------------------------------------------------------------
+    # Misc
+    # ------------------------------------------------------------------
     def _test_rumble(self):
-        if self.slot and self.slot._worker:
-            # Trigger rumble via worker
-            pass
-        QMessageBox.information(self, "Test Rumble", "Rumble test triggered!")
+        if self.slot is not None and self.slot.physical_device is not None:
+            try:
+                from evdev import ecodes as e
+                self.slot.physical_device.write(e.EV_FF, 0x50, 0xFFFF)
+                self.slot.physical_device.syn()
+                QMessageBox.information(self, "Vibração", "Teste enviado ao controle.")
+                return
+            except Exception as ex:
+                logger.debug("Rumble test failed: %s", ex)
+        QMessageBox.information(self, "Vibração", "Controle não conectado.")
 
-    def _test_gyro(self, direction: tuple):
-        QMessageBox.information(self, "Gyro Test", f"Gyro tilt: {direction}")
+    def _stop_controller(self):
+        if self.slot is None:
+            return
+        try:
+            self.slot.stop_worker()
+        except Exception:
+            logger.debug("stop_worker failed", exc_info=True)
+        self.status_label.setText(f"Controle {self.slot_id + 1} parado.")
 
-    # ------------------------------------------------------------------
-    # LIFECYCLE
-    # ------------------------------------------------------------------
     def closeEvent(self, event):
-        """Save geometry on close."""
-        from PySide6.QtCore import QSettings
-        settings = QSettings("DS4Linux", "DS4Linux")
-        settings.setValue("profile_editor/geometry", self.saveGeometry())
+        # Drop the worker.raw_event connection so closing the editor doesn't
+        # leave a dangling slot on a long-lived ControllerSlot worker.
+        raw_worker = getattr(self, "_raw_worker", None)
+        if raw_worker is not None:
+            try:
+                raw_worker.raw_event.disconnect(self._on_raw_event)
+            except (RuntimeError, TypeError):
+                pass
+            self._raw_worker = None
+
+        if self.keep_size_cb.isChecked():
+            self._settings.setValue("profile_editor/geometry", self.saveGeometry())
+        else:
+            self._settings.remove("profile_editor/geometry")
         super().closeEvent(event)
 
 
 class ProfileTabWidget(ProfileEditorWindow):
-    """
-    Alias for backward compatibility with existing code that imports ProfileTabWidget.
-    """
+    """Backwards-compatible alias."""
     pass

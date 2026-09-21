@@ -1,10 +1,18 @@
-from PySide6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
-    QPushButton, QMessageBox, QProgressBar, QGroupBox, QCheckBox
-)
-from PySide6.QtCore import Qt, Signal, Slot, QThread
-from PySide6.QtGui import QFont
 import logging
+
+from PySide6.QtCore import Qt, QThread, Signal, Slot
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QDialog,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QProgressBar,
+    QPushButton,
+    QVBoxLayout,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -22,9 +30,12 @@ class _SetupWorker(QThread):
 
     def run(self):
         from ..engine.system_checker import (
-            is_module_loaded, load_module,
-            is_udev_rules_installed, install_udev_rules,
-            scan_ds4_devices, _fix_led_permissions,
+            _fix_led_permissions,
+            install_udev_rules,
+            is_module_loaded,
+            is_udev_rules_installed,
+            load_module,
+            scan_ds4_devices,
         )
 
         messages = []

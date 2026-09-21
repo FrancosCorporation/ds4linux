@@ -1,7 +1,6 @@
+import logging
 import threading
 import time
-import logging
-from typing import List, Dict, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -18,11 +17,11 @@ class MacroEngine:
         self.vdev = virtual_device
         self.running_macros = {}
 
-    def execute_macro(self, actions: List[MacroAction]):
+    def execute_macro(self, actions: list[MacroAction]):
         thread = threading.Thread(target=self._run_macro, args=(actions,), daemon=True)
         thread.start()
 
-    def _run_macro(self, actions: List[MacroAction]):
+    def _run_macro(self, actions: list[MacroAction]):
         for action in actions:
             if action.action_type == 'wait':
                 time.sleep(action.delay)

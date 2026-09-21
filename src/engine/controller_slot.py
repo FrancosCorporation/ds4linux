@@ -1,20 +1,17 @@
 from __future__ import annotations
 
-from typing import Optional
-from enum import Enum
-from pathlib import Path
 import logging
+from enum import Enum
 
 from evdev import InputDevice
 from PySide6.QtCore import QObject, Signal
 
-from .led_controller import LEDController
-from .virtual_device import VirtualDevice, VirtualDeviceType
-from .input_mapper import InputMapper, ProfileConfig
-from .macro_engine import MacroEngine
-from .worker_thread import WorkerThread
 from .device_manager import DeviceManager
-from ..constants import DS4_VID, DS4_PIDS
+from .input_mapper import InputMapper, ProfileConfig
+from .led_controller import LEDController
+from .macro_engine import MacroEngine
+from .virtual_device import VirtualDevice
+from .worker_thread import WorkerThread
 
 logger = logging.getLogger(__name__)
 
@@ -37,10 +34,10 @@ class ControllerSlot(QObject):
         super().__init__(parent)
         self._slot_id = slot_id
         self._status = SlotStatus.DISCONNECTED
-        self._device: Optional[InputDevice] = None
-        self._device_path: Optional[str] = None
+        self._device: InputDevice | None = None
+        self._device_path: str | None = None
         self._grabbed = False
-        self._profile: Optional[ProfileConfig] = None
+        self._profile: ProfileConfig | None = None
         self._profile_manager = profile_manager
 
         from ..config.profile_manager import ProfileManager
@@ -71,7 +68,7 @@ class ControllerSlot(QObject):
         self.status_changed.emit(value.value)
 
     @property
-    def profile(self) -> Optional[ProfileConfig]:
+    def profile(self) -> ProfileConfig | None:
         return self._profile
 
     @profile.setter
@@ -96,11 +93,11 @@ class ControllerSlot(QObject):
             self.start_worker()
 
     @property
-    def device(self) -> Optional[InputDevice]:
+    def device(self) -> InputDevice | None:
         return self._device
 
     @property
-    def device_path(self) -> Optional[str]:
+    def device_path(self) -> str | None:
         return self._device_path
 
     @property
@@ -114,6 +111,21 @@ class ControllerSlot(QObject):
     @property
     def led_controller(self) -> LEDController:
         return self._led_controller
+
+    @property
+    def worker(self) -> WorkerThread:
+        """The QThread reading this controller (public, read-only)."""
+        return self._worker
+
+    @property
+    def physical_device(self):
+        """The evdev InputDevice for the physical DS4 (None when detached)."""
+        return self._device
+
+    @property
+    def virtual_device(self) -> VirtualDevice:
+        """The uinput-backed virtual controller for this slot."""
+        return self._virtual_device
 
     def set_profile(self, profile: ProfileConfig):
         self.profile = profile
@@ -137,7 +149,7 @@ class ControllerSlot(QObject):
             self._device.grab()
             self._grabbed = True
             print(f"[SLOT{self._slot_id}] Grab exclusivo concedido em {device_path}")
-        except IOError as e:
+        except OSError as e:
             print(f"[SLOT{self._slot_id}] ERRO CRÍTICO: grab() falhou — dispositivo ocupado por outro processo ({e})")
             print(f"[SLOT{self._slot_id}]   Verifique se Steam Input, ds4drv ou outra instância do ds4linux está rodando")
             logger.warning(f"grab() failed for {device_path}: {e} - continuing without grab")
@@ -228,7 +240,9 @@ class ControllerSlot(QObject):
 
     def start_worker(self):
         if self.is_connected and self._input_mapper and not self._worker.isRunning():
-            print(f"[SLOT{self._slot_id}] Iniciando Loop de Leitura do Worker...")
+            logger.info("Slot %s: starting worker loop", self._slot_id)
+            if self._profile is not None:
+                self._worker.set_select_timeout(self._profile.poll_rate_ms / 1000.0)
             self._worker.set_device(self._device)
             self._worker.set_device_grabbed(self._grabbed)
             self._worker.start()
@@ -244,6 +258,7 @@ class ControllerSlot(QObject):
             print(f"[SLOT{self._slot_id}] Worker parado")
 
     def _read_battery(self) -> int:
+        """Battery level 0-100, or 0 when it cannot be read (unknown)."""
         if not self._device:
             return 0
         try:
@@ -251,13 +266,14 @@ class ControllerSlot(QObject):
             if report and len(report) >= 2:
                 return min(100, round(report[1] / 255 * 100))
         except Exception:
-            pass
-        return 100
+            logger.debug("Slot %s: battery read failed", self._slot_id, exc_info=True)
+        return 0
 
     def refresh_battery(self):
         if self.is_connected:
             level = self._read_battery()
-            if level != self._battery_level:
+            # 0 means "unknown" — keep the last known value instead of lying.
+            if level > 0 and level != self._battery_level:
                 self._battery_level = level
                 self.battery_update.emit(level)
 

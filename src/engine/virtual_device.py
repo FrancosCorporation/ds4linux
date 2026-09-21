@@ -1,15 +1,13 @@
 from __future__ import annotations
 
-from enum import Enum
-from typing import Dict, List, Optional, Tuple
 import logging
 import os
+from enum import Enum
 
-from evdev import UInput, AbsInfo, ecodes as e
+from evdev import AbsInfo, UInput
+from evdev import ecodes as e
 
-from ..constants import (
-    MAX_AXIS_VALUE, MAX_TRIGGER_VALUE
-)
+from ..constants import MAX_AXIS_VALUE, MAX_TRIGGER_VALUE
 
 logger = logging.getLogger(__name__)
 
@@ -26,13 +24,13 @@ class VirtualDevice:
         print(f"[VDEV] __init__ slot={slot_id} type={device_type.value}")
         self.device_type = device_type
         self._slot_id = slot_id
-        self._uinput: Optional[UInput] = None
+        self._uinput: UInput | None = None
         self._event_fd: int = -1
         self._event_fd_cached: bool = False
         self._caps, self._name, self._vendor, self._product, self._version = \
             self._build_capabilities()
 
-    def _build_capabilities(self) -> Tuple[Dict[int, list], str, int, int, int]:
+    def _build_capabilities(self) -> tuple[dict[int, list], str, int, int, int]:
         print(f"[VDEV] _build_capabilities type={self.device_type.value}")
         caps = {
             e.EV_KEY: [],
@@ -48,6 +46,7 @@ class VirtualDevice:
                 e.BTN_THUMBL, e.BTN_THUMBR,
                 e.BTN_START, e.BTN_SELECT,
                 e.BTN_MODE,
+                e.BTN_TOUCH,
                 e.BTN_DPAD_UP, e.BTN_DPAD_DOWN,
                 e.BTN_DPAD_LEFT, e.BTN_DPAD_RIGHT,
             ]
@@ -72,6 +71,7 @@ class VirtualDevice:
                 e.BTN_THUMBL, e.BTN_THUMBR,
                 e.BTN_START, e.BTN_SELECT,
                 e.BTN_MODE,
+                e.BTN_TOUCH,
                 e.BTN_DPAD_UP, e.BTN_DPAD_DOWN,
                 e.BTN_DPAD_LEFT, e.BTN_DPAD_RIGHT,
                 e.BTN_TRIGGER_HAPPY1, e.BTN_TRIGGER_HAPPY2,
@@ -98,7 +98,7 @@ class VirtualDevice:
             print(f"[VDEV] create() skipped: already active (fd={self._uinput.fd})")
             return True
         try:
-            print(f"[VDEV] Calling UInput() constructor...")
+            print("[VDEV] Calling UInput() constructor...")
             print(f"[VDEV]   caps EV_KEY count: {len(self._caps[e.EV_KEY])}")
             print(f"[VDEV]   caps EV_ABS count: {len(self._caps[e.EV_ABS])}")
             print(f"[VDEV]   caps EV_FF count: {len(self._caps[e.EV_FF])}")
@@ -130,7 +130,7 @@ class VirtualDevice:
             try:
                 print(f"[VDEV] Closing UInput fd={self._uinput.fd}")
                 self._uinput.close()
-                print(f"[VDEV] UInput closed")
+                print("[VDEV] UInput closed")
             except Exception as ex:
                 print(f"[VDEV] Error closing UInput: {ex}")
             finally:
@@ -173,6 +173,21 @@ class VirtualDevice:
         return -1
 
     @property
+    def event_device_path(self) -> str | None:
+        """Path of the event device created by uinput (e.g. /dev/input/event21).
+
+        Games write force-feedback (EV_FF) events to this node; the worker
+        keeps a reader open on it to forward rumble to the physical pad.
+        """
+        if self._uinput is None:
+            return None
+        try:
+            return self._uinput.device.path
+        except Exception:
+            logger.debug("event_device_path: uinput device has no path", exc_info=True)
+            return None
+
+    @property
     def event_fd(self) -> int:
         """Return the event device fd for reading game output events (rumble, etc).
         The UInput fd is write-only; events from games go to the event device.
@@ -184,7 +199,7 @@ class VirtualDevice:
         try:
             event_path = self._uinput.device.path
             if not event_path:
-                print(f"[VDEV] event_fd: device.path is None")
+                print("[VDEV] event_fd: device.path is None")
                 return -1
             fd = os.open(event_path, os.O_RDWR | os.O_NONBLOCK)
             print(f"[VDEV] event_fd: opened {event_path} -> fd={fd}")

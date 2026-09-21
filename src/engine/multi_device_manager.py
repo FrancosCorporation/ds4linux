@@ -1,16 +1,13 @@
 from __future__ import annotations
 
-from typing import List, Optional, Dict
-from pathlib import Path
 import logging
 
-from evdev import InputDevice
 from PySide6.QtCore import QObject, Signal
 
-from .controller_slot import ControllerSlot, SlotStatus
-from .device_monitor import DeviceMonitor
-from ..constants import DS4_VID, DS4_PIDS, MAX_CONTROLLERS
 from ..config.profile_manager import ProfileManager
+from ..constants import MAX_CONTROLLERS
+from .controller_slot import ControllerSlot
+from .device_monitor import DeviceMonitor
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +27,7 @@ class MultiDeviceManager(QObject):
     def __init__(self, max_slots: int = MAX_CONTROLLERS):
         super().__init__()
         self.max_slots = max_slots
-        self._slots: Dict[int, ControllerSlot] = {}
+        self._slots: dict[int, ControllerSlot] = {}
         self._profile_manager = ProfileManager()
         self._device_paths_in_use: set = set()
 
@@ -48,7 +45,7 @@ class MultiDeviceManager(QObject):
         self._monitor.start()
 
     @staticmethod
-    def scan_and_assign(mgr: "MultiDeviceManager") -> None:
+    def scan_and_assign(mgr: MultiDeviceManager) -> None:
         """Static method to scan for devices and assign them.
         Called from main thread after Qt event loop starts."""
         import evdev
@@ -143,25 +140,25 @@ class MultiDeviceManager(QObject):
     # ------------------------------------------------------------------
     # Slot management
     # ------------------------------------------------------------------
-    def get_slot(self, slot_id: int) -> Optional[ControllerSlot]:
+    def get_slot(self, slot_id: int) -> ControllerSlot | None:
         return self._slots.get(slot_id)
 
-    def get_all_slots(self) -> List[ControllerSlot]:
+    def get_all_slots(self) -> list[ControllerSlot]:
         return list(self._slots.values())
 
-    def get_connected_slots(self) -> List[ControllerSlot]:
+    def get_connected_slots(self) -> list[ControllerSlot]:
         return [s for s in self._slots.values() if s.is_connected]
 
-    def get_available_slot(self) -> Optional[ControllerSlot]:
+    def get_available_slot(self) -> ControllerSlot | None:
         for slot in self._slots.values():
             if not slot.is_connected:
                 return slot
         return None
 
-    def _get_available_slot(self) -> Optional[ControllerSlot]:
+    def _get_available_slot(self) -> ControllerSlot | None:
         return self.get_available_slot()
 
-    def get_slot_by_device_path(self, device_path: str) -> Optional[ControllerSlot]:
+    def get_slot_by_device_path(self, device_path: str) -> ControllerSlot | None:
         for slot in self._slots.values():
             if slot.device_path == device_path:
                 return slot
