@@ -25,8 +25,14 @@ Suporte a DualShock/DualSense no Linux (fork/estudo).
 - **DS4Windows-style UI** - Clickable DS4 artwork (D-pad, face buttons, shoulders, sticks, touchpad) with live highlight, per-button mapping list (listen/edit/remove/reset), Axis/Lightbar/Gyro/Other tabs, integrated log and dark theme
 - **Background daemon** - QThread-based event loop, never blocks GUI
 - **D-pad hardened** - Correct HAT handling for hid-sony (BTN_DPAD_*), hid-playstation (ABS_HAT) and HIDRAW; no stuck diagonals, no duplicate writes
-- **Automated tests + CI** - 45 unit/smoke tests (D-pad regression, HID report parser, worker paths, offscreen GUI) and GitHub Actions workflow
+- **Automated tests + CI** - 178 unit/smoke tests (D-pad regression, HID report parser, worker paths, macros, DSU protocol, FF upload ABI, battery, profile import hardening, offscreen GUI) and GitHub Actions workflow
 - **Configurable polling** - 1/2/4/10 ms worker tick per profile
+- **Auto profiles** - Switch profiles automatically per foreground game (X11 xprop + process fallback), DS4Windows-style
+- **Macros** - Record button sequences per physical button (macro editor with live capture), persisted in the profile JSON
+- **Profile import/export** - Share profiles as portable `.ds4profile` files
+- **CemuHook (DSU) motion server** - UDP motion streaming (100 Hz) for Cemu/Yuzu/Ryujinx/Citra from DS4 sensors
+- **Proportional rumble** - Real strong/weak magnitudes captured via the uinput FF upload handshake (UI_FF_UPLOAD)
+- **On-screen display** - Toast notifications for connection, battery and auto-profile switches (click-through overlay)
 
 ## Architecture
 
@@ -37,15 +43,24 @@ ds4linux/
 ├── assets/                        # Icons, controller images
 ├── src/
 │   ├── constants.py               # evdev/uinput codes, button maps, axis maps, version
+│   ├── main.py                    # Entry point: QApplication, main window, signal handling
 │   │
 │   ├── engine/                    # Core input processing engine
 │   │   ├── device_monitor.py      # pyudev hot-plug detection (add/remove DS4 via udev netlink)
 │   │   ├── device_manager.py      # Scans /dev/input, filters real DS4 (VID/PID), calls grab()
 │   │   ├── controller_slot.py     # Per-controller state machine: attach/detach, LED, profile, worker lifecycle
 │   │   ├── dpad.py                # D-pad/HAT state machine shared by evdev + HIDRAW
+│   │   ├── ds4_hidraw.py          # HIDRAW fallback: report parser (buttons/sticks/HAT), device discovery
+│   │   ├── battery.py             # Battery level sources (sysfs power supply + DS4 status byte)
+│   │   ├── system_checker.py      # Environment checks (uinput/permissions/hidraw) for first-run diagnostics
+│   │   ├── auto_profile.py        # Auto-profile switcher: X11 foreground detection, rules, timers
+│   │   ├── macro_engine.py        # Macro playback engine (key/wait actions on a worker thread)
+│   │   ├── ff_upload.py           # ctypes bindings for the uinput FF upload handshake (rumble magnitudes)
+│   │   ├── cemuhook_server.py     # CemuHook (DSU) UDP motion server for emulators
 │   │   ├── worker_thread.py       # QThread: select()-based I/O on physical fd + uinput fd
 │   │   │                          #   → maps buttons/axes physical→virtual (EV_KEY, EV_ABS)
 │   │   │                          #   → forwards rumble virtual→physical (EV_FF → device.write)
+│   │   │                          #   → answers UI_FF_UPLOAD/ERASE for proportional rumble
 │   │   ├── virtual_device.py      # UInput factory: Xbox 360 / PS4 emulation
 │   │   │                          #   → bustype=USB, INPUT_PROP_GAMEPAD, BTN_GAMEPAD, EV_FF/FF_RUMBLE
 │   │   │                          #   → phys=ds4linux-uinput-<slot> (prevents monitor self-detection)
@@ -53,8 +68,9 @@ ds4linux/
 │   │   │                          #   output curve, square stick, rotation per stick/trigger
 │   │   ├── led_controller.py      # /sys/class/leds/ RGB control (virtual display) + HID output report (78 bytes) for physical LED
 │   │   │                          #   LED path via sysfs device symlink matching
+│   │   ├── motion_source.py       # DS4 accel/gyro parsing from hidraw reports + DSU motion provider
 │   │   └── multi_device_manager.py # Manages 2 slots, HID parent grouping (gamepad+sensors+touchpad),
-│   │                              #   device assignment, reconnect on BT change
+│   │                              #   device assignment, reconnect on BT change, apply_profile_to_all
 │   │
 │   ├── config/
 │   │   └── profile_manager.py     # JSON profile CRUD in ~/.config/ds4linux/profiles/
@@ -66,6 +82,8 @@ ds4linux/
 │       │                          #   SVG icon loading, system tray, about dialog
 │       ├── controllers_table.py   # Table view: slot ID, status, battery, profile combo, LED color cell,
 │       │                          #   edit button → opens ControllerTab
+│       ├── auto_profiles_tab.py   # Auto-profile rules editor (add/remove/enable, process match)
+│       ├── setup_dialog.py        # First-run/system-check dialog (uinput, permissions, hidraw)
 │       ├── controller_tab.py      # Per-controller profile editor:
 │       │                          #   MappingTabWidget (overlay interativo + wizard)
 │       │                          #   LightbarWidget (HSV picker, presets, brightness slider)
@@ -76,7 +94,8 @@ ds4linux/
 │       │                          #   ControllerOverlayWidget (asset + hotspots de todas as teclas)
 │       │                          #   ListenDialog (captura evento bruto), TargetPickerDialog
 │       ├── color_dialog.py        # Custom HSV color wheel dialog (ported from DS4Windows C#)
-│       ├── visual_mapping.py      # DS4 SVG outline with clickable button regions
+│       ├── macro_dialog.py        # Macro editor: record button sequences with live capture
+│       ├── osd_overlay.py         # Frameless toast overlay (connection/battery/profile notices)
 │       └── styles.py              # QSS dark theme: #1e1e2e bg, #00d4aa accent, rounded corners
 │
 ├── install.sh                     # System installer:
@@ -87,8 +106,7 @@ ds4linux/
 ├── requirements.txt               # python-evdev, PySide6, pyudev
 ├── pyproject.toml                 # metadata + ruff config
 ├── .github/workflows/tests.yml     # CI: unittest (offscreen Qt) + ruff
-├── tests/                         # unittest suite (D-pad, HID parser, worker, GUI smoke)
-├── setup.py                       # Package metadata
+├── tests/                         # unittest suite (D-pad, HID parser, worker, DSU, GUI smoke)
 └── README.md
 ```
 
@@ -352,20 +370,21 @@ python3 -m src.main
 - [x] **udev rules corrigidas** - MODE="0666" + TAG+="uaccess" para LEDs e hidraw
 - [ ] **God of War verification** - End-to-end test with Heroic/Proton
 - [ ] **SDL GUID validation** - Confirm virtual device GUID matches expected Xbox/PS4 signatures
-- [ ] **Rumble magnitude mapping** - Proportional forwarding (game sends 0-1 → map to physical 0-255)
+- [x] **Rumble magnitude mapping** - Proportional forwarding via the uinput FF upload handshake (strong/weak magnitudes → physical motors)
 
 ### v1.4.0 - In Progress
 - [x] **D-pad hardening** - Shared HAT state machine (evdev BTN_DPAD / ABS_HAT + HIDRAW), regression tests
 - [x] **DS4Windows-style Controls UI** - Clickable overlay for every button, mapping list, target picker
-- [x] **Test suite + CI** - 45 tests (unittest, offscreen Qt) + ruff + GitHub Actions
+- [x] **Test suite + CI** - 178 tests (unittest, offscreen Qt) + ruff + GitHub Actions
 - [x] **Configurable polling** - 1/2/4/10 ms worker tick saved per profile
 - [x] **Tray + integrated log** - System tray menu and live log tab
-- [ ] **Auto-profiles** - Switch profiles automatically per game (detect via window title / game binary)
-- [ ] **Profile import/export** - Share profiles as `.ds4profile` files
+- [x] **Auto-profiles** - Switch profiles automatically per game (X11 xprop foreground detection + process scan fallback)
+- [x] **Profile import/export** - Share profiles as `.ds4profile` files
+- [x] **Macro support** - Record and playback button sequences (macro editor with live capture, persisted per profile)
+- [x] **On-screen display (OSD)** - Battery/connection/auto-profile toast overlay
+- [x] **CemuHook (DSU) motion server** - 100 Hz UDP motion streaming from DS4 sensors for emulators
 - [ ] **DualSense (PS5) full support** - Adaptive triggers, haptic feedback, microphone LED
 - [ ] **Steam Input compatibility** - Coexist with Steam Input without conflicts
-- [ ] **Macro support** - Record and playback button sequences
-- [ ] **On-screen display (OSD)** - Battery/connection notifications overlay
 
 ### v2.0.0 - Community & Ecosystem
 - [ ] **Multi-controller beyond 2** - Support 4+ controllers

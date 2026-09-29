@@ -484,6 +484,7 @@ class MappingTabWidget(QWidget):
         super().__init__(parent)
         self._worker = worker
         self._mappings: dict[int, int] = {}
+        self._macros: dict[int, list] = {}
         self._device_type = VirtualDeviceType.XBOX
         self._listen_dialog: ListenDialog | None = None
         self._listen_for: int | None = None
@@ -563,6 +564,32 @@ class MappingTabWidget(QWidget):
     def get_mappings(self) -> dict[int, int]:
         return dict(self._mappings)
 
+    # ------------------------------------------------------------------
+    # Macros (bind a recorded sequence to a physical button)
+    # ------------------------------------------------------------------
+    def set_macros(self, macros: dict[int, list]):
+        self._macros = {int(k): list(v) for k, v in (macros or {}).items()}
+        self._refresh_list()
+
+    def get_macros(self) -> dict[int, list]:
+        return {k: list(v) for k, v in self._macros.items()}
+
+    def _edit_macro(self, physical: int):
+        from .macro_dialog import MacroEditorDialog
+        dlg = MacroEditorDialog(
+            physical, self._macros.get(physical), self._worker, self
+        )
+        if dlg.exec() == QDialog.Accepted:
+            actions = dlg.get_actions()
+            if actions:
+                self._macros[int(physical)] = actions
+            else:
+                self._macros.pop(int(physical), None)
+            self._refresh_list()
+        # The editor is recreated on every click — destroy the C++ object too
+        # so repeated edits don't accumulate hidden dialogs (leak).
+        dlg.deleteLater()
+
     def clear(self):
         self._mappings.clear()
         self._refresh_list()
@@ -596,10 +623,21 @@ class MappingTabWidget(QWidget):
         selected = self._selected_code()
         self.mapping_list.blockSignals(True)
         self.mapping_list.clear()
-        for physical, target in sorted(self._mappings.items()):
-            item = QListWidgetItem(
-                f"{physical_name(physical)}   →   {target_name(target, self._device_type)}"
-            )
+        # Union of mapped codes and macro-only codes: a button whose mapping
+        # was removed keeps its macro, and the row must stay visible so the
+        # user can see (and remove) it — otherwise the orphan macro keeps
+        # firing with no UI to reach it.
+        for physical in sorted(set(self._mappings) | set(self._macros)):
+            target = self._mappings.get(physical)
+            macro_tag = "  [macro]" if int(physical) in self._macros else ""
+            if target is None:
+                label = f"{physical_name(physical)}   →   (sem mapeamento){macro_tag}"
+            else:
+                label = (
+                    f"{physical_name(physical)}   →   "
+                    f"{target_name(target, self._device_type)}{macro_tag}"
+                )
+            item = QListWidgetItem(label)
             item.setData(Qt.UserRole, physical)
             item.setData(Qt.UserRole + 1, target)
             self.mapping_list.addItem(item)
@@ -642,10 +680,20 @@ class MappingTabWidget(QWidget):
         code = item.data(Qt.UserRole)
         menu = QMenu(self)
         menu.addAction("Alterar destino...", lambda: self._edit_mapping(code))
-        menu.addAction("Remover mapeamento", lambda: self._remove_mapping(code))
+        macro_label = ("Editar macro..." if code in self._macros
+                       else "Gravar macro...")
+        menu.addAction(macro_label, lambda: self._edit_macro(code))
+        if code in self._macros:
+            menu.addAction("Remover macro", lambda: self._remove_macro(code))
+        if code in self._mappings:
+            menu.addAction("Remover mapeamento", lambda: self._remove_mapping(code))
         menu.addSeparator()
         menu.addAction("Ouvir tecla física...", self._start_listen)
         menu.exec(self.mapping_list.mapToGlobal(pos))
+
+    def _remove_macro(self, physical: int):
+        self._macros.pop(int(physical), None)
+        self._refresh_list()
 
     def _edit_selected(self):
         code = self._selected_code()

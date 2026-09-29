@@ -3,6 +3,8 @@ from __future__ import annotations
 import logging
 import os
 import struct
+import threading
+import time
 import zlib
 from pathlib import Path
 
@@ -61,6 +63,19 @@ class LEDController:
         self._current_color: tuple[int, int, int] = (0, 0, 255)
         self._enabled = True
         self._driver: str | None = None  # 'sony' | 'playstation' | None
+        # Rumble state (0-255 per motor) mirrored into every output report so
+        # color updates never cancel an active vibration (mirrors the kernel's
+        # "always send rumble + lightbar together" compatibility rule).
+        self._rumble_left = 0    # strong motor (0-65535 -> 0-255)
+        self._rumble_right = 0   # weak motor
+        # Transport ('usb' | 'bt') of the configured hidraw node; cached.
+        self._transport: str | None = None
+        # Cached hidraw fd (rumble writes arrive at a high rate).
+        # _hid_lock (RLock) serializes open/write/close: the fd is touched
+        # from the GUI thread (set_color), the worker (set_rumble) and the
+        # DSU rumble handler thread concurrently.
+        self._hid_fd = -1
+        self._hid_lock = threading.RLock()
 
         if led_path:
             self.set_led_path(led_path)
@@ -177,7 +192,11 @@ class LEDController:
 
     def set_hid_device(self, hid_path: Path):
         """Set the specific HID device path for this controller (e.g. /dev/hidraw3)."""
-        self._hid_device_path = hid_path
+        with self._hid_lock:
+            if self._hid_device_path != hid_path:
+                self.close()
+                self._transport = None
+            self._hid_device_path = hid_path
         logger.info(f"LEDController HID device set to: {hid_path}")
 
     # ------------------------------------------------------------------
@@ -194,11 +213,17 @@ class LEDController:
         if not self._enabled:
             logger.debug("set_color: LED disabled, skipping")
             return
-        self._current_color = (r, g, b)
+        # Color + rumble share the same HID output report and are written
+        # from different threads (GUI set_color, worker/DSU set_rumble).
+        # State update, report build and write must be one critical section
+        # or a concurrent setter sees a half-updated report (stale motor or
+        # stale color). _hid_lock is an RLock, so _send_hid_report re-enters.
+        with self._hid_lock:
+            self._current_color = (r, g, b)
 
-        # --- Priority 1: HID output report ---
-        if self._send_hid_report(self._make_hid_output_report(r, g, b)):
-            return
+            # --- Priority 1: HID output report (transport-aware) ---
+            if self._send_hid_report(self._make_color_report(r, g, b)):
+                return
 
         # --- Priority 2: hid-playstation `colors` file (hex RRGGBB) ---
         if self._colors_path:
@@ -232,33 +257,93 @@ class LEDController:
             f"{UDEVS_RULE_HINT.strip()}"
         )
 
-    def _send_hid_report(self, report: bytes) -> bool:
-        """Send HID output report to DS4. Returns True on success."""
-        try:
-            # Use specific HID device if set
-            if self._hid_device_path:
-                hid_path = self._hid_device_path
-                if not hid_path.exists():
-                    logger.warning(f"HID device not found: {hid_path}")
+    def _send_hid_report(self, report: bytes, quiet: bool = False) -> bool:
+        """Send an output report to the DS4 over hidraw. Returns True on success.
+
+        The fd is cached so high-frequency rumble updates do not pay
+        open/close on every write; a failed write invalidates the cache and
+        retries once with a fresh open. The whole open/write/retry sequence
+        runs under ``_hid_lock`` so concurrent callers (GUI, worker, DSU)
+        cannot interleave a close between open and write.
+        """
+        with self._hid_lock:
+            try:
+                fd = self._open_hid()
+                if fd < 0:
+                    if not quiet:
+                        logger.debug("No hidraw node available for output report")
                     return False
-
-                fd = os.open(str(hid_path), os.O_RDWR)
-                os.write(fd, report)
-                os.close(fd)
-                logger.info(f"LED color ({self._current_color[0]},{self._current_color[1]},{self._current_color[2]}) via {hid_path}")
+                try:
+                    os.write(fd, report)
+                except BlockingIOError:
+                    # BT radio busy (EAGAIN, possible with O_NONBLOCK):
+                    # short pause + retry WITHOUT invalidating the cached
+                    # fd — close/reopen on every EAGAIN would churn
+                    # open/close in rumble bursts.
+                    time.sleep(0.002)
+                    os.write(fd, report)
+                if not quiet:
+                    logger.info(
+                        f"LED color ({self._current_color[0]},{self._current_color[1]},"
+                        f"{self._current_color[2]}) via HID output report"
+                    )
                 return True
-
-            # Fallback: find any HID device
-            hid_fd = device_manager.DeviceManager.get_hid_device()
-            if hid_fd is None:
+            except OSError as ex:
+                last_ex = ex
+                self._close_hid_fd()
+                try:
+                    fd = self._open_hid()
+                    if fd >= 0:
+                        try:
+                            os.write(fd, report)
+                        except BlockingIOError:
+                            # Same EAGAIN dance as the first write: the
+                            # retry must not propagate a transient BT stall
+                            # to the caller (it would drop that frame's
+                            # rumble in the worker loop).
+                            time.sleep(0.002)
+                            os.write(fd, report)
+                        return True
+                except OSError as retry_ex:
+                    last_ex = retry_ex
+                if not quiet:
+                    logger.warning(f"HID output report failed: {last_ex}")
                 return False
-            os.write(hid_fd, report)
-            os.close(hid_fd)
-            logger.info(f"LED color ({self._current_color[0]},{self._current_color[1]},{self._current_color[2]}) via HID output report")
-            return True
-        except Exception as e:
-            logger.warning(f"HID output report failed: {e}")
-            return False
+
+    def _open_hid(self) -> int:
+        with self._hid_lock:
+            if self._hid_fd >= 0:
+                return self._hid_fd
+            try:
+                if self._hid_device_path:
+                    if not self._hid_device_path.exists():
+                        return -1
+                    # O_NONBLOCK: a BT hidraw write can stall briefly while
+                    # the radio is busy; without it the _hid_lock (shared by
+                    # GUI/worker/DSU) would be held for the whole stall.
+                    self._hid_fd = os.open(
+                        str(self._hid_device_path), os.O_RDWR | os.O_NONBLOCK
+                    )
+                else:
+                    self._hid_fd = device_manager.DeviceManager.get_hid_device() or -1
+            except OSError as ex:
+                logger.debug(f"HID open failed: {ex}")
+                self._hid_fd = -1
+            return self._hid_fd
+
+    def _close_hid_fd(self):
+        with self._hid_lock:
+            if self._hid_fd >= 0:
+                try:
+                    os.close(self._hid_fd)
+                except OSError:
+                    pass
+                self._hid_fd = -1
+
+    def close(self):
+        """Release the cached hidraw fd."""
+        with self._hid_lock:
+            self._close_hid_fd()
 
     def _write_sysfs(self, path: Path, value: str) -> bool:
         """Write to a sysfs file with proper PermissionError handling."""
@@ -277,11 +362,11 @@ class LEDController:
             return False
 
     # ------------------------------------------------------------------
-    # HID output report (78 bytes, BT format)
+    # HID output reports (BT 78 bytes / USB 32 bytes)
     # ------------------------------------------------------------------
     def _make_hid_output_report(self, r: int, g: int, b: int) -> bytes:
         """
-        Build the DS4 Bluetooth output report (78 bytes) for color setting.
+        Build the DS4 Bluetooth output report (78 bytes).
 
         Report layout:
           byte 0x00: report_id        = 0x11
@@ -290,8 +375,8 @@ class LEDController:
           byte 0x03: valid_flag0      = 0x03 (bit0=motor, bit1=LED)
           byte 0x04: valid_flag1      = 0x00
           byte 0x05: reserved         = 0x00
-          byte 0x06: motor_right      = 0x00
-          byte 0x07: motor_left       = 0x00
+          byte 0x06: motor_right      = weak motor (0-255)
+          byte 0x07: motor_left       = strong motor (0-255)
           byte 0x08: lightbar_red     = r
           byte 0x09: lightbar_green   = g
           byte 0x0A: lightbar_blue    = b
@@ -299,7 +384,6 @@ class LEDController:
           byte 0x0C: lightbar_blink_off     = 0x00
           bytes 0x0D–0x49: reserved (zero)
           bytes 0x4A–0x4D: CRC32 (seed 0xA2, over bytes 0x00–0x49)
-          bytes 0x4E–0x4D: padding to 78
         """
         rep = bytearray(78)
         rep[0]  = 0x11
@@ -308,11 +392,11 @@ class LEDController:
         rep[3]  = 0x01 | 0x02           # valid_flag0: LED + motor
         rep[4]  = 0x00                  # valid_flag1
         rep[5]  = 0x00                  # reserved
-        rep[6]  = 0x00                  # motor_right
-        rep[7]  = 0x00                  # motor_left
-        rep[8]  = r                     # lightbar_red
-        rep[9]  = g                     # lightbar_green
-        rep[10] = b                     # lightbar_blue
+        rep[6]  = self._rumble_right    # motor_right (weak)
+        rep[7]  = self._rumble_left     # motor_left (strong)
+        rep[8] = r                     # lightbar_red
+        rep[9] = g                     # lightbar_green
+        rep[10] = b                    # lightbar_blue
         rep[11] = 0x00                  # blink_on
         rep[12] = 0x00                  # blink_off
         # bytes 13..73 remain zero
@@ -322,6 +406,115 @@ class LEDController:
         crc = ~zlib.crc32(bytes(rep[0:74]), crc) & 0xFFFFFFFF
         struct.pack_into("<I", rep, 74, crc)
         return bytes(rep)
+
+    def _make_color_report(self, r: int, g: int, b: int) -> bytes:
+        """Output report that updates LED + mirrors the current rumble state.
+
+        USB pads get the 32-byte 0x05 report; Bluetooth (and unknown, for
+        backwards compatibility) get the 78-byte 0x11 report with CRC.
+        """
+        if self.detect_transport() == "usb":
+            return self._make_usb_output_report(r, g, b, led=True)
+        return self._make_hid_output_report(r, g, b)
+
+    def _make_usb_output_report(
+        self,
+        r: int | None = None,
+        g: int | None = None,
+        b: int | None = None,
+        led: bool = False,
+    ) -> bytes:
+        """
+        Build the DS4 USB output report (32 bytes, report id 0x05).
+
+        Layout (matches hid-playstation's dualshock4_output_report_usb):
+          byte 0: report_id = 0x05
+          byte 1: valid_flag0 (bit0 = motor, bit1 = LED)
+          byte 2: valid_flag1
+          byte 3: reserved
+          byte 4: motor_right (weak)
+          byte 5: motor_left (strong)
+          byte 6-8: lightbar rgb
+          bytes 9-10: blink
+          bytes 11-31: reserved
+        """
+        rep = bytearray(32)
+        rep[0] = 0x05
+        rep[1] = 0x01                # valid_flag0: motor
+        rep[4] = self._rumble_right
+        rep[5] = self._rumble_left
+        if led:
+            rep[1] |= 0x02           # valid_flag0: LED
+            rep[6] = int(r) & 0xFF
+            rep[7] = int(g) & 0xFF
+            rep[8] = int(b) & 0xFF
+        return bytes(rep)
+
+    def _make_hid_rumble_report(self) -> bytes:
+        """Rumble-only output report for the current transport (no LED flag,
+        so an active sysfs-managed lightbar is never overridden)."""
+        if self.detect_transport() == "usb":
+            return self._make_usb_output_report()
+        rep = bytearray(self._make_hid_output_report(*self._current_color))
+        rep[3] = 0x01                # valid_flag0: motor only
+        rep[8] = rep[9] = rep[10] = 0
+        # Recompute CRC over the modified payload
+        crc = zlib.crc32(bytes([0xA2]), 0xFFFFFFFF)
+        crc = ~zlib.crc32(bytes(rep[0:74]), crc) & 0xFFFFFFFF
+        struct.pack_into("<I", rep, 74, crc)
+        return bytes(rep)
+
+    # ------------------------------------------------------------------
+    # Transport detection
+    # ------------------------------------------------------------------
+    def detect_transport(self) -> str | None:
+        """Return 'usb' or 'bt' for the configured hidraw node (cached).
+
+        Uses /sys/class/hidraw/<node>/device/uevent HID_ID: bus 0003 is
+        USB, bus 0005 is Bluetooth.
+        """
+        if self._transport is not None:
+            return self._transport
+        if not self._hid_device_path:
+            return None
+        try:
+            uevent = (
+                Path(f"/sys/class/hidraw/{self._hid_device_path.name}/device/uevent")
+            )
+            for line in uevent.read_text().splitlines():
+                if line.startswith("HID_ID="):
+                    bus = line.split("=", 1)[1].split(":", 1)[0]
+                    if bus == "0003":
+                        self._transport = "usb"
+                    elif bus == "0005":
+                        self._transport = "bt"
+                    break
+        except OSError:
+            return None
+        if self._transport is None:
+            logger.debug(f"Could not detect transport for {self._hid_device_path}")
+        return self._transport
+
+    # ------------------------------------------------------------------
+    # Rumble (fallback backend used when the physical pad exposes no
+    # force-feedback input node — drives the motors over hidraw instead)
+    # ------------------------------------------------------------------
+    def set_rumble(self, strong: int, weak: int) -> bool:
+        """Drive the DS4 motors proportionally via a HID output report.
+
+        ``strong``/``weak`` are 0-65535 FF_RUMBLE magnitudes; they map to
+        motor_left (strong) and motor_right (weak) at 1/256 resolution,
+        matching the kernel's dualshock4_play_effect(). Returns True when
+        the report was written to the pad.
+        """
+        with self._hid_lock:
+            # State + build + write in one section (see set_color): the
+            # report carries both the motors and the current LED color.
+            self._rumble_left = max(0, min(255, int(strong) // 256))
+            self._rumble_right = max(0, min(255, int(weak) // 256))
+            if self.detect_transport() is None:
+                return False
+            return self._send_hid_report(self._make_hid_rumble_report(), quiet=True)
 
     # ------------------------------------------------------------------
     # Brightness (virtual display)
@@ -341,24 +534,41 @@ class LEDController:
         if target:
             self._write_sysfs(target, str(value))
 
-        # Scale individual color channels proportionally
-        if self._red_path and self._current_color != (0, 0, 0):
+        # Scale individual color channels proportionally. The color read is
+        # inside _hid_lock like every other consumer of _current_color
+        # (set_color publishes it under the same lock). Each sysfs path is
+        # checked individually: partial drivers (red only, etc.) must not
+        # crash on open(None).
+        with self._hid_lock:
+            color = self._current_color
+        if color != (0, 0, 0) and (
+            self._red_path or self._green_path or self._blue_path
+        ):
             scale = value / self._max_brightness if self._max_brightness else 1.0
-            r, g, b = self._current_color
-            self._write_sysfs(self._red_path, str(int(r * scale)))
-            self._write_sysfs(self._green_path, str(int(g * scale)))
-            self._write_sysfs(self._blue_path, str(int(b * scale)))
+            r, g, b = color
+            for path, channel in (
+                (self._red_path, r), (self._green_path, g), (self._blue_path, b),
+            ):
+                if path:
+                    self._write_sysfs(path, str(int(channel * scale)))
 
     # ------------------------------------------------------------------
     # Query helpers
     # ------------------------------------------------------------------
     def get_color(self) -> tuple[int, int, int]:
-        return self._current_color
+        # Same lock discipline as every other _current_color consumer.
+        with self._hid_lock:
+            return self._current_color
 
     def set_enabled(self, enabled: bool):
-        self._enabled = enabled
+        if enabled == self._enabled:
+            return
         if not enabled:
+            # Write the "off" color BEFORE flipping the flag: set_color
+            # bails out when disabled, so calling it afterwards (the old
+            # order) never actually turned the physical LED dark.
             self.set_color(0, 0, 0)
+        self._enabled = enabled
 
     def is_available(self) -> bool:
         """Check if at least one LED path is available."""

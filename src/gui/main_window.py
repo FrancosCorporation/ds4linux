@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QSettings, Qt, QUrl, Signal
+from PySide6.QtCore import QObject, QSettings, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QAction, QDesktopServices, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -23,10 +23,12 @@ from PySide6.QtWidgets import (
 
 from ..constants import APP_NAME, APP_VERSION, MAX_CONTROLLERS, PROFILE_DIR
 from ..engine.auto_profile import AutoProfileManager
+from ..engine.cemuhook_server import CemuHookServer
 from ..engine.multi_device_manager import MultiDeviceManager
 from .auto_profiles_tab import AutoProfilesTab
 from .controller_tab import ProfileTabWidget
 from .controllers_table import ControllersTableWidget
+from .osd_overlay import OSDOverlay
 from .styles import get_stylesheet
 
 logger = logging.getLogger(__name__)
@@ -63,8 +65,12 @@ class MainWindow(QMainWindow):
 
         self._multi_manager = MultiDeviceManager(max_slots=MAX_CONTROLLERS)
         self._auto_profile = AutoProfileManager(self._multi_manager._profile_manager)
+        self._dsu_server = CemuHookServer()
         self._log_handler: QtLogHandler | None = None
         self._tray: QSystemTrayIcon | None = None
+        self._osd = OSDOverlay()
+        self._connected_count = 0
+        self._battery_slots: dict[int, int] = {}
 
         self._setup_ui()
         self._setup_tray()
@@ -212,12 +218,67 @@ class MainWindow(QMainWindow):
         self._controllers_table.controller_edit.connect(self._on_controller_edit)
         self._multi_manager.device_connected_signal.connect(self._on_devices_changed)
         self._multi_manager.device_disconnected_signal.connect(self._on_devices_changed)
+        # Auto-profile: apply the profile bound to the foreground game on ALL
+        # connected controllers (DS4Windows profile_apply_requested behavior).
+        self._auto_profile.profile_apply_requested.connect(self._on_auto_profile_apply)
+        self._auto_profile.log_message.connect(self._append_log)
+        self._auto_profile.start()
+
+        # Battery OSD: one timer per connected slot polls battery_update.
+        self._battery_timer = QTimer(self)
+        self._battery_timer.setInterval(60_000)  # 1 min
+        self._battery_timer.timeout.connect(self._poll_battery)
+        self._battery_timer.start()
+
+        # CemuHook DSU motion server (emulators on UDP 26760).
+        self._dsu_server.set_rumble_handler(self._on_dsu_rumble)
+        if not self._dsu_server.start():
+            logger.warning("DSU motion server unavailable (port in use?)")
+        self._sync_dsu_providers()
+
+    def _sync_dsu_providers(self):
+        """Keep the DSU server's slot table in step with connected controllers."""
+        for slot in self._multi_manager.get_all_slots():
+            self._dsu_server.set_provider(
+                slot.slot_id, slot.motion_provider if slot.is_connected else None
+            )
+
+    def _on_dsu_rumble(self, slot_id: int, motor: int, intensity: int):
+        """Route rumble from a DSU client to the physical controller."""
+        slot = self._multi_manager.get_slot(slot_id)
+        if slot is not None and slot.is_connected:
+            slot.set_external_rumble(motor, intensity)
 
     def _on_devices_changed(self, *args):
+        was_connected = self._connected_count
         self._update_status()
+        self._sync_dsu_providers()
+        # Drop battery baselines for slots that are no longer connected so a
+        # reconnect starts from the current level instead of a stale one.
+        connected_ids = {s.slot_id for s in self._multi_manager.get_all_slots()
+                         if s.is_connected}
+        for stale in [sid for sid in self._battery_slots if sid not in connected_ids]:
+            del self._battery_slots[stale]
+        if self._connected_count > was_connected:
+            self._osd.notify("Controle conectado", level="info")
+        elif self._connected_count < was_connected:
+            self._osd.notify("Controle desconectado", level="warn")
+
+    def _notify_battery(self, slot_id: int, level: int):
+        if level <= 20:
+            lvl = "low"
+            text = f"Controle {slot_id + 1}: bateria baixa ({level}%)"
+        elif level <= 50:
+            lvl = "warn"
+            text = f"Controle {slot_id + 1}: bateria {level}%"
+        else:
+            lvl = "info"
+            text = f"Controle {slot_id + 1}: bateria {level}%"
+        self._osd.notify(text, level=lvl)
 
     def _update_status(self):
         connected = [s for s in self._multi_manager.get_all_slots() if s.is_connected]
+        self._connected_count = len(connected)
         if connected:
             text = f"{len(connected)} controle(s) conectado(s)"
             self.status_chip.setText(f"● {text}")
@@ -257,8 +318,17 @@ class MainWindow(QMainWindow):
             logger.warning("Slot %s not found", slot_id)
             return
 
+        # Drop previous editor(s). removeTab alone only hides the widget:
+        # each "edit controller" click would leak one widget plus one
+        # worker.raw_event connection (closeEvent never fires for tab
+        # children), so release + destroy explicitly.
         while self._profiles_tab.count() > 0:
+            old = self._profiles_tab.widget(0)
             self._profiles_tab.removeTab(0)
+            if old is not None:
+                if hasattr(old, "cleanup"):
+                    old.cleanup()
+                old.deleteLater()
 
         profile_tab = ProfileTabWidget(
             slot_id, slot, self._multi_manager._profile_manager
@@ -270,6 +340,34 @@ class MainWindow(QMainWindow):
 
     def _on_profile_saved(self):
         self._controllers_table.refresh()
+
+    def _on_auto_profile_apply(self, profile_name: str):
+        try:
+            applied = self._multi_manager.apply_profile_to_all(profile_name)
+            if applied:
+                self._controllers_table.refresh()
+                self._osd.notify(f"Perfil: {profile_name}", level="info")
+        except Exception:
+            logger.exception("Auto-profile apply failed for '%s'", profile_name)
+
+    def _poll_battery(self):
+        """Poll each connected slot's battery and notify on change/low level."""
+        for slot in self._multi_manager.get_connected_slots():
+            sid = slot.slot_id
+            prev = self._battery_slots.get(sid)
+            try:
+                slot.refresh_battery()
+                level = slot.battery_level
+            except Exception:
+                continue
+            if level <= 0:
+                continue  # unknown
+            if prev is None:
+                self._battery_slots[sid] = level
+                continue  # first reading: baseline, no toast
+            if level != prev:
+                self._battery_slots[sid] = level
+                self._notify_battery(sid, level)
 
     # ------------------------------------------------------------------
     def show_normal(self):
@@ -283,6 +381,15 @@ class MainWindow(QMainWindow):
         QApplication.instance().quit()
 
     def cleanup(self):
+        if hasattr(self, "_battery_timer"):
+            self._battery_timer.stop()
+        self._dsu_server.stop()
+        # Stop the auto-profile detection timer/thread; otherwise it keeps
+        # running (and logging) after the window is gone.
+        try:
+            self._auto_profile.stop()
+        except Exception:
+            logger.debug("auto-profile stop failed", exc_info=True)
         if self._log_handler is not None:
             logging.getLogger().removeHandler(self._log_handler)
             self._log_handler = None

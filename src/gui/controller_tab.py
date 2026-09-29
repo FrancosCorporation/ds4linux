@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
+    QFileDialog,
     QFormLayout,
     QFrame,
     QGridLayout,
@@ -80,6 +81,10 @@ class ProfileEditorWindow(QWidget):
         self.profile_manager = profile_manager or ProfileManager()
         self._current_profile: ProfileConfig | None = None
         self._settings = QSettings("DS4Linux", "DS4Linux")
+        # Instance state (was a class attribute: mutable state on the class
+        # is shared until first write — code smell).
+        self._hat_x = 0
+        self._hat_y = 0
         self.setStyleSheet(get_stylesheet())
 
         self._setup_ui()
@@ -121,6 +126,17 @@ class ProfileEditorWindow(QWidget):
         header.addWidget(self.device_type_combo)
 
         header.addStretch()
+
+        self.export_btn = QPushButton("Exportar...")
+        self.export_btn.setToolTip("Salvar este perfil como arquivo .ds4profile compartilhável")
+        self.export_btn.clicked.connect(self._export_profile)
+        header.addWidget(self.export_btn)
+
+        self.import_btn = QPushButton("Importar...")
+        self.import_btn.setToolTip("Carregar um perfil de um arquivo .ds4profile")
+        self.import_btn.clicked.connect(self._import_profile)
+        header.addWidget(self.import_btn)
+
         self.keep_size_cb = QCheckBox("Manter o tamanho da janela ao fechar")
         header.addWidget(self.keep_size_cb)
         root.addLayout(header)
@@ -551,6 +567,7 @@ class ProfileEditorWindow(QWidget):
 
         self.mapping_tab.set_device_type(profile.device_type)
         self.mapping_tab.set_mappings(profile.button_maps)
+        self.mapping_tab.set_macros(profile.macros)
 
         self._fill_axis_widgets(profile.left_stick, self.ls_deadzone, self.ls_maxzone,
                                 self.ls_antideadzone, self.ls_sensitivity, self.ls_curve,
@@ -604,6 +621,7 @@ class ProfileEditorWindow(QWidget):
         profile.name = name
         profile.device_type = self.device_type_combo.currentData() or VDT.XBOX
         profile.button_maps = self.mapping_tab.get_mappings()
+        profile.macros = self.mapping_tab.get_macros()
 
         profile.left_stick = AxisConfig(
             deadzone=self.ls_deadzone.value(),
@@ -658,6 +676,43 @@ class ProfileEditorWindow(QWidget):
     def _cancel_profile(self):
         self._load_current_profile()
         logger.info("Profile edit cancelled")
+
+    # ------------------------------------------------------------------
+    # Import / export (.ds4profile)
+    # ------------------------------------------------------------------
+    def _export_profile(self):
+        name = self.profile_name_edit.text().strip() or \
+            (self._current_profile.name if self._current_profile else "")
+        if not name:
+            QMessageBox.warning(self, "Exportar", "Salve o perfil antes de exportar.")
+            return
+        default = name.replace(" ", "_") + ".ds4profile"
+        dest, _filter = QFileDialog.getSaveFileName(
+            self, "Exportar perfil", default, "Perfil DS4Linux (*.ds4profile)"
+        )
+        if not dest:
+            return
+        if self.profile_manager.export_profile(name, dest):
+            QMessageBox.information(self, "Exportar", f"Perfil exportado:\n{dest}")
+        else:
+            QMessageBox.critical(self, "Erro", "Não foi possível exportar o perfil.")
+
+    def _import_profile(self):
+        src, _filter = QFileDialog.getOpenFileName(
+            self, "Importar perfil", "", "Perfil DS4Linux (*.ds4profile *.json)"
+        )
+        if not src:
+            return
+        name = self.profile_manager.import_profile(src)
+        if not name:
+            QMessageBox.critical(
+                self, "Erro", "Não foi possível importar o perfil (arquivo inválido?)."
+            )
+            return
+        QMessageBox.information(self, "Importar", f"Perfil \"{name}\" importado.")
+        self.profile_name_edit.setText(name)
+        self._load_current_profile()
+        self.profile_saved.emit(name)
 
     def _on_device_type_changed(self):
         device_type = self.device_type_combo.currentData()
@@ -734,9 +789,6 @@ class ProfileEditorWindow(QWidget):
                     value = int((value - 128) * 258)
                 bar.setValue(max(bar.minimum(), min(bar.maximum(), value)))
 
-    _hat_x = 0
-    _hat_y = 0
-
     def _set_button_state(self, code: int, pressed: bool):
         label = self.btn_states.get(code)
         if label is None:
@@ -765,15 +817,15 @@ class ProfileEditorWindow(QWidget):
     # Misc
     # ------------------------------------------------------------------
     def _test_rumble(self):
-        if self.slot is not None and self.slot.physical_device is not None:
+        if self.slot is not None and self.slot.is_connected:
             try:
-                from evdev import ecodes as e
-                self.slot.physical_device.write(e.EV_FF, 0x50, 0xFFFF)
-                self.slot.physical_device.syn()
+                ok = self.slot.test_rumble()
+            except Exception:
+                logger.debug("Rumble test failed", exc_info=True)
+                ok = False
+            if ok:
                 QMessageBox.information(self, "Vibração", "Teste enviado ao controle.")
                 return
-            except Exception as ex:
-                logger.debug("Rumble test failed: %s", ex)
         QMessageBox.information(self, "Vibração", "Controle não conectado.")
 
     def _stop_controller(self):
@@ -785,9 +837,9 @@ class ProfileEditorWindow(QWidget):
             logger.debug("stop_worker failed", exc_info=True)
         self.status_label.setText(f"Controle {self.slot_id + 1} parado.")
 
-    def closeEvent(self, event):
-        # Drop the worker.raw_event connection so closing the editor doesn't
-        # leave a dangling slot on a long-lived ControllerSlot worker.
+    def _disconnect_raw_worker(self):
+        # Drop the worker.raw_event connection so discarding the editor
+        # doesn't leave a dangling slot on a long-lived ControllerSlot worker.
         raw_worker = getattr(self, "_raw_worker", None)
         if raw_worker is not None:
             try:
@@ -795,6 +847,18 @@ class ProfileEditorWindow(QWidget):
             except (RuntimeError, TypeError):
                 pass
             self._raw_worker = None
+
+    def cleanup(self):
+        """Release external references before the widget is discarded.
+
+        ``closeEvent`` never fires for a widget embedded in a QTabWidget
+        (it is hidden by removeTab, not closed), so the main window calls
+        this when swapping profile tabs.
+        """
+        self._disconnect_raw_worker()
+
+    def closeEvent(self, event):
+        self._disconnect_raw_worker()
 
         if self.keep_size_cb.isChecked():
             self._settings.setValue("profile_editor/geometry", self.saveGeometry())

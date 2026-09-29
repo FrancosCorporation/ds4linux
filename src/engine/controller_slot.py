@@ -4,12 +4,19 @@ import logging
 from enum import Enum
 
 from evdev import InputDevice
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, QTimer, Signal
 
+from .battery import battery_percent_from_sysfs
 from .device_manager import DeviceManager
 from .input_mapper import InputMapper, ProfileConfig
 from .led_controller import LEDController
 from .macro_engine import MacroEngine
+from .motion_source import (
+    DS4MotionProvider,
+    DS4MotionReader,
+    detect_hid_transport,
+    read_hid_uniq,
+)
 from .virtual_device import VirtualDevice
 from .worker_thread import WorkerThread
 
@@ -51,6 +58,9 @@ class ControllerSlot(QObject):
         self._led_controller = LEDController()
         self._worker = WorkerThread()
         self._battery_level = 100
+        self._motion_provider = DS4MotionProvider()
+        self._motion_reader: DS4MotionReader | None = None
+        self._dsu_rumble = [0, 0]  # [strong, weak] set by DSU clients
 
         self._setup_worker()
 
@@ -76,7 +86,29 @@ class ControllerSlot(QObject):
         was_running = self._worker.isRunning()
         if was_running:
             self._worker.stop(intentional=True)
-            self._worker.wait(1000)
+            if not self._worker.wait(1000):
+                # Rare: the loop is still winding down (exit took >2s).
+                # Give it a bounded extra window instead of swapping the
+                # virtual device under a live thread (its select()/writes
+                # would hit a destroyed fd).
+                if not self._worker.wait(2000):
+                    logger.warning(
+                        "Slot %s: worker did not exit before the profile "
+                        "swap — proceeding with the device swap anyway",
+                        self._slot_id,
+                    )
+            # Release keys the stopped run left pressed BEFORE set_profile
+            # resets the mapper state: the vdev survives a same-type swap
+            # and would keep them stuck until the next press+release. Only
+            # when the thread really exited AND the vdev is still alive —
+            # a winding-down thread may still write the same vdev, and a
+            # destroyed vdev has nothing stuck on it.
+            if not self._worker.isRunning() and self._virtual_device.is_active():
+                self._worker.release_stuck_buttons(
+                    self._input_mapper,
+                    self._virtual_device.write_event,
+                    self._virtual_device.sync,
+                )
 
         self._profile = value
         self._input_mapper.set_profile(value)
@@ -127,6 +159,44 @@ class ControllerSlot(QObject):
         """The uinput-backed virtual controller for this slot."""
         return self._virtual_device
 
+    @property
+    def motion_provider(self) -> DS4MotionProvider:
+        """Latest motion sample for this slot (feeds the DSU server)."""
+        return self._motion_provider
+
+    def set_external_rumble(self, motor: int, intensity: int) -> None:
+        """Rumble requested by a DSU (CemuHook) client.
+
+        motor 0 = strong/left motor, motor 1 = weak/right motor,
+        intensity 0..255. Routed through the HID output report so it works
+        whether or not the evdev force-feedback path is in use.
+        """
+        if motor not in (0, 1):
+            return
+        value = max(0, min(255, int(intensity))) * 257  # 0..255 -> 0..65535
+        self._dsu_rumble[motor] = value
+        self._led_controller.set_rumble(self._dsu_rumble[0], self._dsu_rumble[1])
+
+    def _start_motion_reader(self, hidraw_path: str) -> None:
+        self._stop_motion_reader()
+        transport = detect_hid_transport(hidraw_path)
+        self._motion_provider.connection_type = 2 if transport == "bt" else 1
+        uniq = read_hid_uniq(hidraw_path)
+        if uniq:
+            try:
+                mac = bytes.fromhex(uniq.replace(":", ""))
+                if len(mac) >= 6:
+                    self._motion_provider.mac = mac[:6]
+            except ValueError:
+                pass
+        self._motion_reader = DS4MotionReader(hidraw_path, self._motion_provider)
+        self._motion_reader.start()
+
+    def _stop_motion_reader(self) -> None:
+        if self._motion_reader is not None:
+            self._motion_reader.stop()
+            self._motion_reader = None
+
     def set_profile(self, profile: ProfileConfig):
         self.profile = profile
 
@@ -152,10 +222,6 @@ class ControllerSlot(QObject):
         except OSError as e:
             print(f"[SLOT{self._slot_id}] ERRO CRÍTICO: grab() falhou — dispositivo ocupado por outro processo ({e})")
             print(f"[SLOT{self._slot_id}]   Verifique se Steam Input, ds4drv ou outra instância do ds4linux está rodando")
-            logger.warning(f"grab() failed for {device_path}: {e} - continuing without grab")
-            self._grabbed = False
-        except OSError as e:
-            print(f"[SLOT{self._slot_id}] ERRO: grab() falhou com OSError: {e}")
             logger.warning(f"grab() failed for {device_path}: {e} - continuing without grab")
             self._grabbed = False
 
@@ -184,6 +250,7 @@ class ControllerSlot(QObject):
             if hid_path:
                 self._led_controller.set_hid_device(hid_path)
                 logger.info(f"Found HID device: {hid_path}")
+                self._start_motion_reader(str(hid_path))
 
         # Apply LED settings from profile
         self._led_controller.set_color(*self._profile.led_color)
@@ -194,6 +261,7 @@ class ControllerSlot(QObject):
         return True
 
     def detach_device(self):
+        self._stop_motion_reader()
         if not self._device:
             return
         if self._grabbed:
@@ -201,12 +269,14 @@ class ControllerSlot(QObject):
                 self._device.ungrab()
             except OSError:
                 pass
-            try:
-                self._device.close()
-            except OSError:
-                pass
             self._grabbed = False
             print(f"[SLOT{self._slot_id}] Dispositivo físico desanexado e ungrab")
+        # Close regardless of grab: when grab() failed the fd stayed open
+        # until GC (evdev __del__), leaking one descriptor per reattach.
+        try:
+            self._device.close()
+        except OSError:
+            pass
 
         was_connected = self.is_connected
         self._device = None
@@ -258,16 +328,19 @@ class ControllerSlot(QObject):
             print(f"[SLOT{self._slot_id}] Worker parado")
 
     def _read_battery(self) -> int:
-        """Battery level 0-100, or 0 when it cannot be read (unknown)."""
+        """Battery level 0-100 from the kernel power supply, 0 = unknown.
+
+        The old code read ``self._device.device.read_feature_report(...)``
+        which does not exist on evdev devices (AttributeError on every
+        call), so the GUI battery column never updated from ``--``.
+        """
         if not self._device:
             return 0
         try:
-            report = self._device.device.read_feature_report(0x02, 17)
-            if report and len(report) >= 2:
-                return min(100, round(report[1] / 255 * 100))
+            hid_path = DeviceManager.get_hid_device_path(self._device)
         except Exception:
-            logger.debug("Slot %s: battery read failed", self._slot_id, exc_info=True)
-        return 0
+            hid_path = None
+        return battery_percent_from_sysfs(str(hid_path) if hid_path else None)
 
     def refresh_battery(self):
         if self.is_connected:
@@ -288,6 +361,34 @@ class ControllerSlot(QObject):
         if self._profile:
             self._profile.led_color = (r, g, b)
 
+    def test_rumble(self, duration_ms: int = 500) -> bool:
+        """Proportional rumble self-test (auto-stops after duration_ms).
+
+        Prefers the worker's force-feedback path; falls back to a direct
+        HID output report when the worker loop is not running.
+        """
+        if not self.is_connected:
+            return False
+        if self._worker.isRunning():
+            return self._worker.test_rumble(duration_ms)
+        ok = self._led_controller.set_rumble(0xFFFF, 0x8000)
+        if ok:
+            led = self._led_controller
+
+            def _stop():
+                # One-shot may fire after the slot was discarded (cleanup
+                # closed the LED): capture only the controller (never self)
+                # and swallow late errors instead of reopening a dead fd.
+                try:
+                    led.set_rumble(0, 0)
+                except Exception:
+                    pass
+
+            QTimer.singleShot(duration_ms, _stop)
+        return ok
+
     def cleanup(self):
         self.stop_worker()
         self.detach_device()
+        self._led_controller.close()
+        self._macro_engine.shutdown()

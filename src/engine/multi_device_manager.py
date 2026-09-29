@@ -78,10 +78,13 @@ class MultiDeviceManager(QObject):
                         if slot.device and slot.device.uniq == dev.uniq and not slot.is_connected:
                             logger.info(f"Reconnecting device {dev.uniq} to slot {slot.slot_id}")
                             self._device_paths_in_use.add(path)
-                            slot._device_path = path
                             if slot.attach_device(path):
                                 slot.start_worker()
                                 self.device_connected_signal.emit(slot.slot_id, path)
+                            else:
+                                # Don't leak the path: a failed attach must
+                                # leave the device reassignable.
+                                self._device_paths_in_use.discard(path)
                             return
             except Exception:
                 pass
@@ -110,10 +113,9 @@ class MultiDeviceManager(QObject):
                 self.device_connected_signal.emit(sid, slot.device_path or "")
 
     def _on_slot_device_disconnected(self):
-        """Forward slot device_disconnected signal for GUI updates."""
-        for sid, slot in self._slots.items():
-            if not slot.is_connected and slot.device_path is None:
-                pass  # Already handled by _on_device_removed
+        """Slot-level disconnect is fully handled by ``_on_device_removed``
+        (which knows the device path); nothing to forward here."""
+        return
 
     def _on_slot_log(self, msg: str):
         logger.info(msg)

@@ -203,6 +203,35 @@ class TestProfileEditor(unittest.TestCase):
         editor._set_led_color((10, 20, 30))
         self.assertEqual(editor._current_profile.led_color, (10, 20, 30))
 
+    def test_cleanup_disconnects_raw_worker_signal(self):
+        """closeEvent never fires for a widget inside a QTabWidget, so the
+        main window calls cleanup() when swapping tabs — without it every
+        "edit controller" click leaked one worker.raw_event connection."""
+        from PySide6.QtCore import QObject, Signal
+
+        from src.config.profile_manager import ProfileManager
+        from src.gui.controller_tab import ProfileEditorWindow
+
+        class FakeWorker(QObject):
+            raw_event = Signal(int, int, int)
+
+        worker = FakeWorker()
+        slot = FakeSlot()
+        editor = ProfileEditorWindow(0, slot, ProfileManager())
+
+        received = []
+        editor._on_raw_event = lambda t, c, v: received.append((t, c, v))
+        worker.raw_event.connect(editor._on_raw_event)
+        editor._raw_worker = worker
+
+        worker.raw_event.emit(1, 0x130, 1)
+        self.assertEqual(len(received), 1)  # connected
+
+        editor.cleanup()
+        worker.raw_event.emit(1, 0x130, 0)
+        self.assertEqual(len(received), 1)  # connection dropped
+        self.assertIsNone(editor._raw_worker)
+
 
 if __name__ == "__main__":
     unittest.main()

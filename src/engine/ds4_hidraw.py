@@ -126,6 +126,10 @@ class DS4HIDRAWReader:
         self._hidraw_path = hidraw_path
         self._fd = -1
 
+    @property
+    def hidraw_path(self) -> str:
+        return self._hidraw_path
+
     def open(self) -> bool:
         """Open the hidraw device."""
         try:

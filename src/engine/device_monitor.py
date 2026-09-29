@@ -20,7 +20,8 @@ class DeviceMonitor(QObject):
 
     device_added = Signal(str)        # input event path (e.g. /dev/input/event27)
     device_removed = Signal(str)
-    scan_finished = Signal(list)     # list of initial paths
+    scan_finished = Signal(list)      # list of initial paths
+    stop_requested = Signal()         # queued: stop timers in the monitor thread
 
     def __init__(self, parent: QObject | None = None):
         super().__init__(parent)
@@ -29,6 +30,10 @@ class DeviceMonitor(QObject):
         self._running = False
         self._thread: QThread | None = None
         self._timer: QTimer | None = None
+        self._rescan_timer: QTimer | None = None
+        # QTimer objects are created in the monitor thread and must only be
+        # touched there; stop() runs on the GUI thread, so it queues this.
+        self.stop_requested.connect(self._stop_timers)
 
     def start(self) -> None:
         self._thread = QThread()
@@ -38,11 +43,19 @@ class DeviceMonitor(QObject):
 
     def stop(self) -> None:
         self._running = False
-        if self._timer:
-            self._timer.stop()
+        # Never call QTimer.stop() directly here: this method runs on the
+        # caller's (GUI) thread while the timers belong to the monitor
+        # thread. The queued slot stops both timers; quit() is processed
+        # after it (event queue is FIFO).
+        self.stop_requested.emit()
         if self._thread:
             self._thread.quit()
             self._thread.wait(2000)
+
+    def _stop_timers(self) -> None:
+        for timer in (self._timer, self._rescan_timer):
+            if timer is not None:
+                timer.stop()
 
     def _init(self) -> None:
         self._running = True

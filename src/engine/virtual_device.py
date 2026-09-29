@@ -173,6 +173,16 @@ class VirtualDevice:
         return -1
 
     @property
+    def uinput(self):
+        """The underlying evdev UInput device (None while inactive).
+
+        Exposed for the worker's FF handshake loop: ``uinput.read()``
+        yields EV_UINPUT events (UI_FF_UPLOAD / UI_FF_ERASE) written by
+        the kernel when a game uploads or erases a force-feedback effect.
+        """
+        return self._uinput
+
+    @property
     def event_device_path(self) -> str | None:
         """Path of the event device created by uinput (e.g. /dev/input/event21).
 

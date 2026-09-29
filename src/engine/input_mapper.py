@@ -75,6 +75,11 @@ class InputMapper:
         self.macro_engine = macro_engine
         self._axis_state: dict[int, int] = {}
         self._btn_state: dict[int, bool] = {}
+        # ds4_code -> virtual code ACTUALLY written to the virtual device.
+        # The button_maps can change (profile swap) while a button is down;
+        # the release sweep must target the code that was written, not the
+        # one the current profile would map it to.
+        self._written_virtual: dict[int, int] = {}
 
     def set_profile(self, profile: ProfileConfig):
         self.profile = profile
@@ -95,19 +100,49 @@ class InputMapper:
         """Shared axis cache (evdev code -> last emitted value)."""
         return self._axis_state
 
-    def map_button(self, ds4_code: int, value: int) -> tuple | None:
-        # Macro check
-        if ds4_code in self.profile.macros and self.macro_engine and value == 1:
+    @property
+    def written_virtual(self) -> dict:
+        """ds4_code -> virtual code actually written to the virtual device
+        (release-sweep source of truth across profile swaps)."""
+        return self._written_virtual
+
+    def is_macro_button(self, ds4_code: int) -> bool:
+        """True when the profile binds a macro to this physical button."""
+        return bool(self.profile and ds4_code in self.profile.macros)
+
+    def maybe_execute_macro(self, ds4_code: int, value: int) -> bool:
+        """Fire the macro bound to ``ds4_code`` (on press only).
+
+        Returns True whenever the button is macro-bound — for both press and
+        release — so callers can treat such buttons as fully consumed: a
+        macro *replaces* the button instead of coexisting with its mapping.
+        """
+        if not self.is_macro_button(ds4_code):
+            return False
+        if value == 1 and self.macro_engine is not None:
             self.macro_engine.execute_macro(self.profile.macros[ds4_code])
+        return True
+
+    def map_button(self, ds4_code: int, value: int) -> tuple | None:
+        pressed = value == 1
+        if self.is_macro_button(ds4_code):
+            # Transition-triggered: works for both edge sources (evdev) and
+            # level sources (hidraw, which repeats the full state every
+            # packet). Macro-bound buttons are consumed in both directions.
+            if self._btn_state.get(ds4_code) == pressed:
+                return None
+            self._btn_state[ds4_code] = pressed
+            if pressed and self.macro_engine is not None:
+                self.macro_engine.execute_macro(self.profile.macros[ds4_code])
             return None
 
         if ds4_code not in self.profile.button_maps:
             return None
         virtual_code = self.profile.button_maps[ds4_code]
-        pressed = value == 1
         if self._btn_state.get(ds4_code) == pressed:
             return None
         self._btn_state[ds4_code] = pressed
+        self._written_virtual[ds4_code] = virtual_code
         return (virtual_code, 1 if pressed else 0)
 
     def map_axis(self, ds4_code: int, value: int) -> tuple | None:
@@ -201,6 +236,7 @@ class InputMapper:
     def reset_state(self):
         self._axis_state.clear()
         self._btn_state.clear()
+        self._written_virtual.clear()
 
     def get_default_mapping(self, device_type: VirtualDeviceType) -> dict[int, int]:
         if device_type == VirtualDeviceType.XBOX:

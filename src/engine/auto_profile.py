@@ -5,10 +5,13 @@ import logging
 import os
 import re
 import subprocess
+import threading
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QTimer, Signal
+
+from ..config.profile_manager import _atomic_write_json
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +69,9 @@ class AutoProfileManager(QObject):
         self._enabled: bool = True
         self._current_profile: str | None = None
         self._last_key: tuple | None = None
+        # Foreground detection runs on a worker thread (xprop/pgrep can take
+        # seconds); the busy flag prevents overlapping runs.
+        self._detect_busy = False
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self.check_now)
@@ -87,9 +93,16 @@ class AutoProfileManager(QObject):
                 self._enabled = bool(data.get("enabled", True))
                 self._revert_to_default = bool(data.get("revert_to_default", True))
                 self._default_profile = data.get("default_profile", "") or ""
-                self._rules = [
-                    AutoProfileRule(**r) for r in data.get("rules", [])
-                ]
+                rules = []
+                for r in data.get("rules", []):
+                    try:
+                        rules.append(AutoProfileRule(**r))
+                    except TypeError:
+                        # One malformed/renamed entry must not discard the
+                        # rest: a single unknown field used to wipe every
+                        # rule here, and the next save() persisted the loss.
+                        logger.warning("Skipping invalid auto-profile rule: %r", r)
+                self._rules = rules
                 logger.info(f"Loaded {len(self._rules)} auto-profile rule(s)")
         except Exception as e:
             logger.error(f"Failed to load auto-profiles: {e}")
@@ -103,8 +116,9 @@ class AutoProfileManager(QObject):
                 "default_profile": self._default_profile,
                 "rules": [asdict(r) for r in self._rules],
             }
-            with open(self._file(), "w") as f:
-                json.dump(data, f, indent=2)
+            # Same atomic write used for profiles: a crash mid-write must
+            # never truncate auto_profiles.json.
+            _atomic_write_json(self._file(), data)
             self.rules_changed.emit()
         except Exception as e:
             logger.error(f"Failed to save auto-profiles: {e}")
@@ -258,10 +272,46 @@ class AutoProfileManager(QObject):
     # Matching / profile switching
     # ------------------------------------------------------------------
     def check_now(self):
+        """Kick off one asynchronous foreground detection.
+
+        Detection shells out to xprop/pgrep, so it never runs on the GUI
+        thread: a slow or hung X server would otherwise freeze the window.
+        Signals are emitted from the worker thread and delivered to GUI
+        receivers through Qt's queued connections.
+        """
+        if not self._enabled or self._detect_busy:
+            return
+        # Nothing could ever apply: skip detection entirely.
+        if not self._rules and not self._revert_to_default:
+            return
+        self._detect_busy = True
+        try:
+            threading.Thread(
+                target=self._detect_worker,
+                name="ds4linux-auto-profile",
+                daemon=True,
+            ).start()
+        except Exception:
+            # Never leave the busy latch stuck: without this, a failed
+            # Thread.start() disabled detection forever (check_now bails
+            # on _detect_busy and nothing ever clears it again).
+            self._detect_busy = False
+            logger.error("Could not start auto-profile detection thread",
+                         exc_info=True)
+
+    def _detect_worker(self):
+        try:
+            info = self.get_foreground_info()
+            self._apply_detection(info)
+        except Exception:
+            logger.debug("Auto-profile detection failed", exc_info=True)
+        finally:
+            self._detect_busy = False
+
+    def _apply_detection(self, info):
+        # The user may have disabled/stopped us while detection was running.
         if not self._enabled:
             return
-
-        info = self.get_foreground_info()
         if not info:
             self.detection_state_changed.emit("Nenhuma janela ativa detectada")
             return
@@ -297,4 +347,11 @@ class AutoProfileManager(QObject):
             self.check_now()
 
     def stop(self):
+        """Halt detection on shutdown (state is not persisted).
+
+        Disabling the flag as well makes an in-flight detection thread
+        bail out in ``_apply_detection`` instead of re-arming the timer
+        after this call.
+        """
+        self._enabled = False
         self._timer.stop()
