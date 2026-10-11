@@ -210,7 +210,7 @@ python3 -m src.main
 |-----|-------------|
 | **Controllers** | Table view of all controller slots with status, battery, profile dropdown, LED color, edit button |
 | **Profiles** | Placeholder - select controller from Controllers tab |
-| **Auto Profiles** | Coming soon - auto-switch profiles by game |
+| **Auto Profiles** | Add, edit, enable, and remove rules that switch profiles by matching the foreground game/process |
 | **Settings** | Startup options, udev installer, about |
 | **Log** | Real-time event log |
 
@@ -367,7 +367,7 @@ python3 -m src.main
 - [x] **MappingTab interativo** - Overlay sobre imagem do controle, Listen Mode, Wizard de mapeamento rápido
 - [x] **LEDController multi-fallback** - Detecção hid-sony/hid-playstation, HID report + sysfs colors/brightness
 - [x] **WorkerThread raw_event** - Sinal para captura de eventos brutos pela UI
-- [x] **udev rules corrigidas** - MODE="0666" + TAG+="uaccess" para LEDs e hidraw
+- [x] **udev access hardened** - MODE="0660", input group, and active-seat `uaccess`; installer adds only the invoking desktop user to `input`
 - [ ] **God of War verification** - End-to-end test with Heroic/Proton
 - [ ] **SDL GUID validation** - Confirm virtual device GUID matches expected Xbox/PS4 signatures
 - [x] **Rumble magnitude mapping** - Proportional forwarding via the uinput FF upload handshake (strong/weak magnitudes → physical motors)

@@ -227,11 +227,20 @@ PYEOF
 }
 
 setup_user_permissions() {
-    log_info "Setting up user permissions..."
-    for user in $(awk -F: '$3 >= 1000 && $3 < 65534 {print $1}' /etc/passwd); do
-        usermod -a -G input "$user" 2>/dev/null || true
-    done
-    log_success "Users added to input group (re-login required)"
+    local installer_user="${SUDO_USER:-}"
+    if [[ -z "$installer_user" || "$installer_user" == "root" ]] || ! id "$installer_user" >/dev/null 2>&1; then
+        log_warning "Could not identify the desktop user. udev's uaccess ACL will grant access to the active seat."
+        return
+    fi
+    if ! getent group input >/dev/null; then
+        log_warning "The input group is unavailable. udev's uaccess ACL will grant access to the active seat."
+        return
+    fi
+    if usermod -a -G input "$installer_user"; then
+        log_success "$installer_user added to the input group (log out and back in to apply)"
+    else
+        log_warning "Could not add $installer_user to the input group; udev's uaccess ACL may still grant active-seat access."
+    fi
 }
 
 load_hid_playstation_module() {
