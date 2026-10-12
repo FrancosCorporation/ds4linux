@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -41,12 +42,14 @@ def _store_password(password: str) -> bool:
         return False
 
 
-def _run_sudo(command: str, password: str | None = None) -> tuple[int, str, str]:
-    """Run a command with sudo, providing password via stdin."""
+def _run_sudo(*command: str, password: str | None = None) -> tuple[int, str, str]:
+    """Run an argument-vector command with sudo, without invoking a shell."""
     pw = password or _get_stored_password()
+    if not pw:
+        return 1, "", "Senha sudo não disponível"
     try:
         proc = subprocess.run(
-            ["sudo", "-S", "sh", "-c", command],
+            ["sudo", "-S", "--", *command],
             input=f"{pw}\n",
             capture_output=True,
             text=True,
@@ -70,11 +73,15 @@ def is_module_loaded(module: str = MODULE_NAME) -> bool:
 
 def load_module(module: str = MODULE_NAME, password: str | None = None) -> bool:
     """Load the hid-playstation kernel module."""
+    if not isinstance(module, str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", module):
+        logger.error("Invalid kernel module name: %r", module)
+        return False
+
     if is_module_loaded(module):
         logger.info(f"Module {module} already loaded")
         return True
 
-    returncode, stdout, stderr = _run_sudo(f"modprobe {module}", password)
+    returncode, _stdout, stderr = _run_sudo("modprobe", module, password=password)
     if returncode == 0:
         logger.info(f"Module {module} loaded successfully")
         return True
@@ -85,11 +92,10 @@ def load_module(module: str = MODULE_NAME, password: str | None = None) -> bool:
 
 def is_udev_rules_installed() -> bool:
     """Check if DS4Linux udev rules are installed."""
-    if not UDEVS_RULES_DEST.exists():
+    if not UDEVS_RULES_SOURCE.is_file() or not UDEVS_RULES_DEST.is_file():
         return False
     try:
-        content = UDEVS_RULES_DEST.read_text()
-        return "054c" in content.lower() and "uinput" in content.lower()
+        return UDEVS_RULES_DEST.read_bytes() == UDEVS_RULES_SOURCE.read_bytes()
     except Exception:
         return False
 
@@ -105,17 +111,18 @@ def install_udev_rules(password: str | None = None) -> tuple[bool, str]:
         _fix_led_permissions(password)
         return True, "Regras udev já instaladas"
 
-    cmd = (
-        f"cp '{UDEVS_RULES_SOURCE}' '{UDEVS_RULES_DEST}' && "
-        "udevadm control --reload-rules && "
-        "udevadm trigger"
+    commands = (
+        ("cp", "--", str(UDEVS_RULES_SOURCE), str(UDEVS_RULES_DEST)),
+        ("udevadm", "control", "--reload-rules"),
+        ("udevadm", "trigger"),
     )
-    returncode, stdout, stderr = _run_sudo(cmd, password)
-    if returncode == 0:
-        logger.info("udev rules installed and reloaded successfully")
-    else:
-        logger.error(f"Failed to install udev rules: {stderr}")
-        return False, stderr
+    for command in commands:
+        returncode, _stdout, stderr = _run_sudo(*command, password=password)
+        if returncode != 0:
+            logger.error("Failed to run privileged command %s: %s", command[0], stderr)
+            return False, stderr
+
+    logger.info("udev rules installed and reloaded successfully")
 
     _fix_led_permissions(password)
     return True, "Regras udev instaladas"
@@ -130,12 +137,11 @@ def _fix_led_permissions(password: str | None = None):
         "/sys/class/leds/input*:blue/brightness",
         "/sys/class/leds/input*:global/brightness",
     ]
-    user = os.getenv("USER", "servidor")
     for pattern in led_patterns:
         for path in glob.glob(pattern):
             if os.path.exists(path):
-                _run_sudo(f"chown {user}:{user} '{path}'", password)
-                _run_sudo(f"chmod 0666 '{path}'", password)
+                _run_sudo("chown", "root:input", path, password=password)
+                _run_sudo("chmod", "0660", path, password=password)
 
 
 def scan_ds4_devices() -> list:
