@@ -9,3 +9,7 @@ dist/
 .planning/
 *.pyc
 zlib
+
+# Artefatos de build Python
+build/
+*.egg-info/
