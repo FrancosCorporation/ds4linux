@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 🐛 Segurança / vulnerabilidade
+    url: https://github.com/FrancosCorporation/ds4linux/security/advisories/new
+    about: Reporte vulnerabilidades em privado — não abra issue pública.
+  - name: ❓ Diagnóstico e solução de problemas
+    url: https://github.com/FrancosCorporation/ds4linux#-solução-de-problemas
+    about: A maioria dos casos comuns já está documentada na tabela do README.
+  - name: 📋 Backlog e propostas
+    url: https://github.com/FrancosCorporation/ds4linux/blob/version_2.1/plan.md
+    about: Veja se a ideia já existe no plano do projeto (IDs INPUT-, GUI-, FUT-…).

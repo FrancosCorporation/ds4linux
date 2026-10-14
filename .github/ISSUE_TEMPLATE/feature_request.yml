@@ -1,0 +1,57 @@
+name: "💡 Feature request"
+description: Sugira um recurso ou melhoria
+title: "[feat] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Antes de abrir, vale checar o [plan.md](https://github.com/FrancosCorporation/ds4linux/blob/version_2.1/plan.md),
+        onde o backlog é mantido com IDs (ex.: `FUT-08` = gyro para mouse). Se a
+        proposta já existir lá, comente na ficha dela em vez de duplicar.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Qual problema isso resolve?
+      description: Em vez de descrever a solução, descreva o que hoje não é possível fazer.
+      placeholder: "Não consigo usar o giroscópio para mirar em jogos de tiro."
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Como você imaginou a solução
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Área
+      options:
+        - Entrada / D-pad / eixos
+        - Perfis e mapeamento
+        - GUI
+        - Instalação / pacotes
+        - Compatibilidade (Steam, SDL, jogos)
+        - LED / vibração / bateria
+        - DualSense ou outros controles
+        - Outro
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternativas que você já tentou
+      description: Outras ferramentas, configurações ou workarounds.
+
+  - type: checkboxes
+    id: context
+    attributes:
+      label: Contexto
+      options:
+        - label: Estou disposto a testar versões de desenvolvimento e reportar o resultado
+        - label: Pesquisei o backlog (plan.md) e essa proposta não está lá

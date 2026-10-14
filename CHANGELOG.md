@@ -5,6 +5,26 @@ Todas as mudanças notáveis neste projeto são documentadas neste arquivo.
 O formato é baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/),
 e este projeto adota [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
+## [2.1.0] - 2026-10-14
+
+### Adicionado
+
+- `SECURITY.md` com versões suportadas, canal privado de reporte e escopo
+  (privilégio, credencial, entrada não confiável, escrita em `uinput`).
+- Templates de issue em GitHub Forms (bug com distro/conexão/virtual, feature
+  com área e link para o backlog) e template de pull request com checklist.
+- `dependabot.yml` semanal para `pip` e `github-actions`.
+- CI: job `dependency-audit` com `pip-audit --strict`, artefato do `.deb` em
+  cada build e job `release` que anexa o pacote à release quando sai uma tag
+  `v*` (a release deixa de depender de upload manual).
+- CI cobre `version_*` e `Version-*` por padrão, em vez de três nomes fixos —
+  a branch `version_2.1` estava fora da lista de gatilhos.
+
+### Mudado
+
+- README: a menção do pacote não fixa mais o nome de uma release específica
+  (`ds4linux_<versão>_all.deb`), evitando link quebrado a cada versão.
+
 ## [2.0.0] - 2026-10-14
 
 ### Adicionado
@@ -105,6 +125,7 @@ e este projeto adota [Versionamento Semântico](https://semver.org/lang/pt-BR/).
   do fd do dispositivo de jogo (não do uinput) e corrida na varredura de
   dispositivos.
 
+[2.1.0]: https://github.com/FrancosCorporation/ds4linux/compare/v2.0.0...HEAD
 [2.0.0]: https://github.com/FrancosCorporation/ds4linux/compare/v1.4.0...v2.0.0
 [1.4.0]: https://github.com/FrancosCorporation/ds4linux/releases/tag/v1.4.0
 [1.3.1]: https://github.com/FrancosCorporation/ds4linux/releases/tag/v1.3.1

@@ -1,0 +1,107 @@
+name: "🐛 Bug report"
+description: O DS4Linux não fez o que você esperava
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Obrigado por reportar! Quanto mais detalhe, mais rápido consigo reproduzir.
+        Para **vulnerabilidades**, use o fluxo privado descrito em [SECURITY.md](../../SECURITY.md)
+        em vez desta issue.
+
+  - type: input
+    id: version
+    attributes:
+      label: Versão do DS4Linux
+      description: Aparece em Configurações → Sobre. Se compilou da branch, diga o `git rev-parse --short HEAD`.
+      placeholder: "2.1.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install
+    attributes:
+      label: Como você instalou?
+      options:
+        - Pacote .deb da release
+        - sudo ./install.sh
+        - A partir do código (venv/editável)
+        - Outro
+    validations:
+      required: true
+
+  - type: input
+    id: distro
+    attributes:
+      label: Distribuição e kernel
+      description: Cole a saída de `cat /etc/os-release` e `uname -r`.
+      placeholder: "Ubuntu 26.04 / 6.14.0-1-generic"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: connection
+    attributes:
+      label: Conexão do controle
+      options:
+        - USB
+        - Bluetooth
+        - Os dois (pareado por Bluetooth, usado via USB)
+        - Não conectado / outro controle
+    validations:
+      required: true
+
+  - type: dropdown
+    id: output
+    attributes:
+      label: Controle virtual escolhido
+      options:
+        - Xbox 360
+        - PlayStation 4
+        - Ainda não cheguei a configurar
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Passos para reproduzir
+      description: Sequência exata de ações, começando pelo estado inicial.
+      placeholder: |
+        1. Abro o DS4Linux com o DS4 pareado por Bluetooth
+        2. Vou em Perfil → Controle 1 → Controles
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: O que esperava
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: O que aconteceu
+      description: Inclua o traceback completo quando houver (não precisa apagar nada).
+    validations:
+      required: true
+
+  - type: textarea
+    id: game
+    attributes:
+      label: Jogo/runtime (se for problema em jogo)
+      description: Título, launcher (Steam/Proton/Wine/Heroic/Lutris), perfil ativo e se usa Steam Input.
+      placeholder: "Título X via Steam/Proton, perfil 'Xbox 360', Steam Input desligado"
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Antes de enviar
+      options:
+        - label: Reconectei o controle depois de instalar/atualizar as regras udev
+        - label: Não há outro serviço (Steam Input, ds4drv) capturando o mesmo controle
+        - label: Procurei o sintoma em [Diagnóstico](https://github.com/FrancosCorporation/ds4linux#-solução-de-problemas)

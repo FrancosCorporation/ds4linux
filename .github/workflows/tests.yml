@@ -5,7 +5,8 @@ permissions:
 
 on:
   push:
-    branches: [master, Version-1.0, version_2.0]
+    branches: [master, "Version-*", "version_*"]
+    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 
@@ -23,6 +24,13 @@ jobs:
           package="$(find dist -maxdepth 1 -name '*.deb' -print -quit)"
           test -n "$package"
           dpkg-deb --info "$package"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: deb-package
+          path: dist/*.deb
+          if-no-files-found: error
+          retention-days: 14
 
   unit:
     runs-on: ubuntu-24.04
@@ -47,3 +55,48 @@ jobs:
 
       - name: Lint (ruff)
         run: ruff check src tests
+
+  dependency-audit:
+    # Job separado: uma CVE nova em dependência não pode esconder o resultado
+    # dos testes, mas precisa aparecer como check vermelho no PR.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install pip-audit
+        run: python -m pip install --upgrade pip pip-audit
+
+      - uses: actions/checkout@v7
+
+      - name: Audit locked dependencies
+        run: pip-audit -r requirements-ci.txt --strict
+
+  # Anexa o .deb à release toda vez que uma tag v* é publicada, então a
+  # release nunca fica sem o pacote (o README aponta para ele).
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [deb-package, unit, dependency-audit]
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build Debian package
+        run: packaging/deb/build-deb.sh dist
+
+      - name: Attach package to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="$GITHUB_REF_NAME"
+          version="${tag#v}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/*.deb --clobber
+          else
+            gh release create "$tag" dist/*.deb \
+              --title "DS4Linux $version" \
+              --generate-notes
+          fi
