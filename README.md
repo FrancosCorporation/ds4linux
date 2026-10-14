@@ -10,6 +10,10 @@
 </p>
 
 <p align="center">
+  <a href="README.en.md">English</a> • <b>Português</b>
+</p>
+
+<p align="center">
   <a href="LICENSE"><img alt="Licença MIT" src="https://img.shields.io/badge/licença-MIT-blue.svg"/></a>
   <a href="https://github.com/FrancosCorporation/ds4linux/releases/latest"><img alt="Versão" src="https://img.shields.io/github/v/release/FrancosCorporation/ds4linux?label=versão&color=2a9d8f"/></a>
   <img alt="Plataforma" src="https://img.shields.io/badge/plataforma-Linux-0e7490.svg"/>
@@ -107,13 +111,37 @@ privilégios na primeira execução.
 > Após instalar ou atualizar, **reconecte o controle** para aplicar as
 > permissões novas.
 
+Checklist de validação em VM limpa (INSTALL-01):
+[docs/validacao-deb.md](docs/validacao-deb.md) — use
+`packaging/deb/verify-deb.sh` para inspecionar o pacote e conferir a
+instalação depois do `dpkg -i`.
+
 O pacote instala a regra em `/usr/lib/udev/rules.d/99-z-ds4linux.rules`. Como
 o udev processa arquivos em [ordem lexical](https://cgit.freedesktop.org/systemd/systemd/tree/man/udev.xml),
 ela é aplicada **depois** da regra antiga `/etc/udev/rules.d/99-ds4linux.rules`
 sem apagar nem editar esse arquivo — uma personalização administrativa com o
 mesmo nome continua sendo respeitada e aparece no diagnóstico do app.
 
-### 2. A partir do código (qualquer distribuição)
+### 2. Arch Linux / AUR
+
+O [`PKGBUILD`](packaging/arch/PKGBUILD) vive em `packaging/arch/` e pode ser
+instalado por qualquer helper de AUR:
+
+```bash
+yay -S ds4linux-git     # ou paru, aura, …
+```
+
+Ele empacota o wheel, instala a entrada de menu, o ícone, a licença e a mesma
+regra udev `99-z-ds4linux.rules` em `/usr/lib/udev/rules.d/` (o diagnóstico do
+app reconhece esse caminho como regra gerenciada por pacote), recarregando as
+regras após instalar/atualizar.
+
+> ⚠️ O pacote **ainda não foi publicado no AUR** — o `PKGBUILD` está no
+> repositório. Para publicar, gere a `.SRCINFO` com
+> `makepkg --printsrcinfo > .SRCINFO` na pasta `packaging/arch/` e envie pelo
+> AUR. Atenção: é um pacote de desenvolvimento (`-git`), que segue a branch.
+
+### 3. A partir do código (qualquer distribuição)
 
 ```bash
 git clone https://github.com/FrancosCorporation/ds4linux.git
@@ -128,7 +156,7 @@ DS4Linux como root**. As regras usam grupo `input`, modo `0660` e `uaccess`
 para a sessão ativa; não é necessário tornar `/dev/uinput`, HIDRAW ou LEDs
 graváveis por todos. Reconecte o controle depois de instalar.
 
-### 3. Instalação manual (sem o instalador)
+### 4. Instalação manual (sem o instalador)
 
 ```bash
 sudo apt install python3 python3-pip python3-venv python3-dev build-essential \
@@ -146,7 +174,7 @@ O aplicativo **abre mesmo sem as regras udev**: a aba **Configurações** mostra
 o estado e oferece reparação opcional. A senha, quando necessária, é
 solicitada pelo sistema (polkit) e nunca é guardada pelo app.
 
-### 4. Gerar o `.deb` localmente
+### 5. Gerar o `.deb` localmente
 
 ```bash
 packaging/deb/build-deb.sh
@@ -238,7 +266,8 @@ QT_QPA_PLATFORM=offscreen python -m unittest tests.test_dpad tests.test_worker_d
   [tags do repositório](https://github.com/FrancosCorporation/ds4linux/releases)
 - **Backlog, evidências e validação pendente:** [plan.md](plan.md)
 - **Histórico de implementação e testes:** [resumo.md](resumo.md)
-- `version_2.0` é o nome da branch de desenvolvimento, alinhado à release
+- **Segurança e reporte de vulnerabilidade:** [SECURITY.md](SECURITY.md)
+- `version_2.1` é o nome da branch de desenvolvimento, alinhada à versão
 
 ---
 

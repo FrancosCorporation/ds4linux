@@ -1,0 +1,20 @@
+reload_udev() {
+  if command -v udevadm >/dev/null 2>&1; then
+    udevadm control --reload-rules
+    udevadm trigger --subsystem-match=input
+  fi
+}
+
+post_install() {
+  reload_udev
+  echo "DS4Linux instalado. Reconecte o controle para aplicar as permissões,"
+  echo "ou execute 'ds4linux' para abrir a interface."
+}
+
+post_upgrade() {
+  reload_udev
+}
+
+post_remove() {
+  reload_udev
+}

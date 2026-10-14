@@ -47,6 +47,8 @@ install -m 0644 "$REPO_DIR/assets/joystick.png" "$PACKAGE_ROOT/usr/share/ds4linu
 install -m 0644 "$REPO_DIR/udev/99-ds4linux.rules" "$PACKAGE_ROOT/usr/share/ds4linux/udev/99-ds4linux.rules"
 install -m 0644 "$REPO_DIR/udev/99-ds4linux.rules" "$PACKAGE_ROOT/usr/lib/udev/rules.d/99-z-ds4linux.rules"
 install -m 0644 "$REPO_DIR/README.md" "$PACKAGE_ROOT/usr/share/doc/ds4linux/README.md"
+install -m 0644 "$REPO_DIR/CHANGELOG.md" "$PACKAGE_ROOT/usr/share/doc/ds4linux/CHANGELOG.md"
+install -m 0644 "$REPO_DIR/LICENSE" "$PACKAGE_ROOT/usr/share/doc/ds4linux/LICENSE"
 install -m 0644 "$REPO_DIR/assets/icon.png" \
     "$PACKAGE_ROOT/usr/share/icons/hicolor/256x256/apps/ds4linux.png"
 
@@ -60,22 +62,12 @@ exec /usr/bin/python3 -m src.main "$@"
 LAUNCHER
 chmod 0755 "$PACKAGE_ROOT/usr/bin/ds4linux"
 
-cat > "$PACKAGE_ROOT/usr/share/applications/ds4linux.desktop" <<'DESKTOP'
-[Desktop Entry]
-Version=1.2
-Type=Application
-Name=DS4Linux
-GenericName=DualShock 4 Emulator
-Comment=Configure and use compatible Sony controllers on Linux
-Exec=ds4linux
-Icon=ds4linux
-Terminal=false
-Categories=Game;Settings;HardwareSettings;
-StartupNotify=true
-StartupWMClass=DS4Linux
-Keywords=controller;dualshock;playstation;xbox;emulator;
-DESKTOP
-chmod 0644 "$PACKAGE_ROOT/usr/share/applications/ds4linux.desktop"
+# Fonte única do desktop entry (também usada por install.sh e pelo PKGBUILD).
+install -m 0644 "$REPO_DIR/packaging/ds4linux.desktop" \
+    "$PACKAGE_ROOT/usr/share/applications/ds4linux.desktop"
+
+# Installed-Size é exigido pela Política de Pacotes Debian (§5.6.12).
+INSTALLED_SIZE="$(du -sk "$PACKAGE_ROOT/usr" | cut -f1)"
 
 cat > "$PACKAGE_ROOT/DEBIAN/control" <<CONTROL
 Package: ds4linux
@@ -83,6 +75,7 @@ Version: $VERSION
 Section: games
 Priority: optional
 Architecture: all
+Installed-Size: $INSTALLED_SIZE
 Maintainer: FrancosCorporation <rodolfofranco14@hotmail.com>
 Homepage: https://github.com/FrancosCorporation/ds4linux
 Depends: python3 (>= 3.10), python3-evdev (>= 1.6.1), python3-pyudev (>= 0.24), python3-pyside6.qtwidgets (>= 6.5), python3-pyside6.qtnetwork (>= 6.5), udev

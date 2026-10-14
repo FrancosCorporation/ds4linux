@@ -96,6 +96,9 @@ install_files() {
     rsync -a "$SCRIPT_DIR/udev/" "$INSTALL_DIR/udev/"
     install -m 0644 "$SCRIPT_DIR/requirements.txt" "$INSTALL_DIR/requirements.txt"
     install -m 0644 "$SCRIPT_DIR/README.md" "$INSTALL_DIR/README.md"
+    install -m 0644 "$SCRIPT_DIR/CHANGELOG.md" "$INSTALL_DIR/CHANGELOG.md"
+    install -m 0644 "$SCRIPT_DIR/LICENSE" "$INSTALL_DIR/LICENSE"
+    install -m 0644 "$SCRIPT_DIR/CONTRIBUTING.md" "$INSTALL_DIR/CONTRIBUTING.md"
 }
 
 install_udev_rules() {
@@ -121,21 +124,7 @@ EOF
 create_desktop_entry() {
     log_info "Creating desktop entry..."
     mkdir -p "$DESKTOP_DIR"
-    cat > "$DESKTOP_DIR/ds4linux.desktop" << EOF
-[Desktop Entry]
-Version=1.2
-Type=Application
-Name=DS4Linux
-GenericName=DualShock 4 Emulator
-Comment=Emulate Xbox/PS4 controller with DualShock 4 on Linux
-Exec=ds4linux
-Icon=ds4linux
-Terminal=false
-Categories=Game;Settings;HardwareSettings;
-StartupNotify=true
-StartupWMClass=DS4Linux
-Keywords=controller;dualshock;playstation;xbox;emulator;
-EOF
+    install -m 0644 "$SCRIPT_DIR/packaging/ds4linux.desktop" "$DESKTOP_DIR/ds4linux.desktop"
 }
 
 create_icon() {

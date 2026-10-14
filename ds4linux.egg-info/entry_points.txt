@@ -1,0 +1,2 @@
+[console_scripts]
+ds4linux = src.main:main

@@ -1,0 +1,54 @@
+# Maintainer: FrancosCorporation <rodolfofrancoxico@gmail.com>
+#
+# Pacote de desenvolvimento (AUR): segue a branch version_2.1.
+# Instalação:  yay -S ds4linux-git   (ou paru, aura, …)
+#
+# O nome da regra udev é o mesmo do pacote Debian (99-z-ds4linux.rules)
+# porque src/engine/system_checker.py reconhece esse caminho como
+# "regra gerenciada por pacote" no diagnóstico do app.
+
+pkgname=ds4linux-git
+pkgver=2.1.0.r0.g0000000
+pkgrel=1
+pkgdesc="DualShock 4 emulator for Linux — Xbox 360 / PS4 virtual controller"
+arch=('any')
+url="https://github.com/FrancosCorporation/ds4linux"
+license=('MIT')
+depends=('python' 'pyside6' 'python-evdev' 'python-pyudev' 'udev')
+makedepends=('git' 'python-build' 'python-installer' 'python-wheel' 'python-setuptools')
+optdepends=(
+  'hid-playstation: kernel driver used when the controller is detected'
+)
+provides=('ds4linux')
+conflicts=('ds4linux')
+install=ds4linux.install
+source=("$pkgname::git+https://github.com/FrancosCorporation/ds4linux.git")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "$pkgname"
+  # v2.1.0-3-gabc1234 -> 2.1.0.r3.gabc1234
+  git describe --long --tags --abbrev=8 | sed 's/^v//;s/\([^-]*-g\)/r\1/;s/-/./g'
+}
+
+build() {
+  cd "$pkgname"
+  python -m build --wheel --no-isolation
+}
+
+package() {
+  cd "$pkgname"
+
+  python -m installer --destdir="$pkgdir" dist/*.whl
+
+  # Regra udev (o wheel também instala os assets em share/ds4linux).
+  install -Dm644 udev/99-ds4linux.rules \
+    "$pkgdir/usr/lib/udev/rules.d/99-z-ds4linux.rules"
+
+  # Entrada de menu, ícone e licença.
+  install -Dm644 packaging/ds4linux.desktop \
+    "$pkgdir/usr/share/applications/ds4linux.desktop"
+  install -Dm644 assets/icon.png \
+    "$pkgdir/usr/share/icons/hicolor/256x256/apps/ds4linux.png"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

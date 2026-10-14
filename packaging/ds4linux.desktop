@@ -1,0 +1,13 @@
+[Desktop Entry]
+Version=1.2
+Type=Application
+Name=DS4Linux
+GenericName=DualShock 4 Emulator
+Comment=Configure and use compatible Sony controllers on Linux
+Exec=ds4linux
+Icon=ds4linux
+Terminal=false
+Categories=Game;Settings;HardwareSettings;
+StartupNotify=true
+StartupWMClass=DS4Linux
+Keywords=controller;dualshock;playstation;xbox;emulator;

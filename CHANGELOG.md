@@ -11,6 +11,24 @@ e este projeto adota [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 - `SECURITY.md` com versões suportadas, canal privado de reporte e escopo
   (privilégio, credencial, entrada não confiável, escrita em `uinput`).
+- `README.en.md`: tradução completa do README com seletor de idioma nos dois
+  arquivos.
+- `packaging/arch/PKGBUILD` + `ds4linux.install` para o AUR (pacote
+  `ds4linux-git`, ainda não submetido ao AUR), com a mesma regra udev
+  reconhecida pelo diagnóstico.
+- `packaging/ds4linux.desktop` como fonte única da entrada de menu (antes
+  existia dois heredocs divergentes em `install.sh` e `build-deb.sh`).
+- O `.deb` agora instala também `LICENSE` e `CHANGELOG.md` em
+  `/usr/share/doc/ds4linux/`, e o `install.sh` copia `LICENSE`,
+  `CHANGELOG.md` e `CONTRIBUTING.md` para `/opt/ds4linux`.
+- `packaging/deb/verify-deb.sh` (inspeção estática do `.deb` e modo
+  `--installed` para a VM) e `docs/validacao-deb.md` (checklist de 12 passos
+  de INSTALL-01 em VM limpa).
+
+### Corrigido
+
+- `DEBIAN/control` passou a declarar `Installed-Size`, exigido pela Política
+  de Pacotes Debian §5.6.12 (antes o campo faltava no pacote publicado).
 - Templates de issue em GitHub Forms (bug com distro/conexão/virtual, feature
   com área e link para o backlog) e template de pull request com checklist.
 - `dependabot.yml` semanal para `pip` e `github-actions`.

@@ -51,7 +51,7 @@ unidades `HARDWARE-01`/`INPUT-01`).
 
 ## 3. Fluxo de contribuição
 
-1. Crie uma branch a partir de `version_2.0` (branch de desenvolvimento ativa).
+1. Crie uma branch a partir de `version_2.1` (branch de desenvolvimento ativa; `version_2.0` é a anterior, já mesclada).
 2. Faça commits pequenos e descritivos, no formato Conventional Commits já
    usado no repositório: `feat:`, `fix:`, `fix(security):`, `docs:`, `test:`,
    `ci:`, `chore:`.
