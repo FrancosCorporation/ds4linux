@@ -11,6 +11,7 @@ e este projeto adota [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
 - Arquivo `LICENSE` (MIT) na raiz, coerente com `pyproject.toml`, além de
   `CONTRIBUTING.md` e deste `CHANGELOG.md`.
+- Pacote `ds4linux_2.0.0_all.deb` publicado como asset da release `v2.0.0`.
 - Pacote Debian (`packaging/deb/build-deb.sh`) para Ubuntu 26.04 e Debian 13,
   com `postinst`/`postrm` não interativos, launcher, entrada de menu, ícone,
   assets e regra udev vendor (`99-z-ds4linux.rules`) ordenada depois de
