@@ -91,11 +91,11 @@ e runtime correspondentes.
 
 ### 1. Pacote `.deb` — Ubuntu 26.04 / Debian 13 (recomendado)
 
-Baixe o [`ds4linux_2.0.0_all.deb`](https://github.com/FrancosCorporation/ds4linux/releases/latest)
-na seção Releases, abra o arquivo no instalador gráfico da distribuição e
-confirme a autorização administrativa **uma vez**. Depois, abra **DS4Linux**
-pelo menu: o app roda como usuário normal e não abre assistente de privilégios
-na primeira execução.
+Baixe o **pacote `.deb`** em [Releases](https://github.com/FrancosCorporation/ds4linux/releases/latest)
+(o arquivo se chama `ds4linux_<versão>_all.deb`), abra-o no instalador gráfico
+da distribuição e confirme a autorização administrativa **uma vez**. Depois, abra
+**DS4Linux** pelo menu: o app roda como usuário normal e não abre assistente de
+privilégios na primeira execução.
 
 | Passo | O que o pacote faz |
 |---|---|
@@ -233,7 +233,8 @@ QT_QPA_PLATFORM=offscreen python -m unittest tests.test_dpad tests.test_worker_d
 
 ## 📊 Estado do projeto
 
-- **Versão:** 2.0.0 — mudanças em [CHANGELOG.md](CHANGELOG.md), releases nas
+- **Versão:** 2.1.0 (branch de desenvolvimento) — mudanças em
+  [CHANGELOG.md](CHANGELOG.md), releases nas
   [tags do repositório](https://github.com/FrancosCorporation/ds4linux/releases)
 - **Backlog, evidências e validação pendente:** [plan.md](plan.md)
 - **Histórico de implementação e testes:** [resumo.md](resumo.md)
