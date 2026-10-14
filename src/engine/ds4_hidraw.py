@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -204,40 +205,71 @@ class DS4HIDRAWReader:
         return {'x': parsed['dpad_x'], 'y': parsed['dpad_y']}
 
 
-def find_ds4_hidraw(uniq: str | None = None) -> str | None:
+def find_ds4_hidraw(
+    uniq: str | None = None,
+    input_device_path: str | None = None,
+    *,
+    sys_class_input: Path = Path("/sys/class/input"),
+    sys_class_hidraw: Path = Path("/sys/class/hidraw"),
+) -> str | None:
     """Find the hidraw device for a DS4/Wireless Controller.
 
     When ``uniq`` (the Bluetooth MAC reported by evdev) is given, the
-    matching hidraw node is returned so multiple controllers each read
-    their own reports.  Falls back to the first Sony hidraw device.
-    Uses udev properties (HID_ID/HID_NAME/HID_UNIQ) — no manual file reads.
+    matching hidraw node is returned. For USB devices without a unique ID,
+    match the input event and hidraw interface through their shared sysfs HID
+    parent. If identity is ambiguous, return None rather than cross-wire two
+    controllers. A global fallback is allowed only when exactly one Sony
+    controller exists and no input-device identity was supplied.
     """
-    import pyudev
-
-    fallback = None
     normalized_uniq = (uniq or "").lower().replace(":", "")
+    expected_hid = None
+    if input_device_path:
+        try:
+            event = (sys_class_input / Path(input_device_path).name).resolve()
+            expected_hid = event.parents[2]
+        except (OSError, RuntimeError, IndexError):
+            logger.debug("Cannot resolve input sysfs parent for %s", input_device_path)
 
+    matches = []
+    candidates = []
     try:
-        ctx = pyudev.Context()
-        for dev in ctx.list_devices(subsystem='hidraw'):
-            node = dev.device_node
-            if not node:
+        for entry in sorted(sys_class_hidraw.glob("hidraw*")):
+            link = entry / "device"
+            if not link.exists():
                 continue
-            hid_id = (dev.get('HID_ID') or '').upper()
-            hid_name = dev.get('HID_NAME') or ''
-            # Match Sony vendor (054C) or Wireless Controller
-            if '054C' not in hid_id and 'Wireless Controller' not in hid_name:
+            try:
+                hid_parent = link.resolve()
+                properties = {}
+                for line in (hid_parent / "uevent").read_text().splitlines():
+                    key, sep, value = line.partition("=")
+                    if sep:
+                        properties[key] = value
+            except (OSError, RuntimeError):
                 continue
-            if fallback is None:
-                fallback = node
-            if normalized_uniq:
-                hid_uniq = (dev.get('HID_UNIQ') or '').lower().replace(":", "")
-                if normalized_uniq == hid_uniq:
-                    return node
-    except Exception as e:
-        logger.warning("find_ds4_hidraw: %s", e)
 
-    return fallback
+            hid_id = properties.get("HID_ID", "").upper()
+            hid_name = properties.get("HID_NAME", "")
+            if "054C" not in hid_id and "Wireless Controller" not in hid_name:
+                continue
+            node = f"/dev/{entry.name}"
+            candidates.append(node)
+            if normalized_uniq:
+                hid_uniq = properties.get("HID_UNIQ", "").lower().replace(":", "")
+                if normalized_uniq == hid_uniq:
+                    matches.append(node)
+            elif expected_hid is not None and hid_parent == expected_hid:
+                matches.append(node)
+    except OSError as exc:
+        logger.warning("find_ds4_hidraw: sysfs scan failed: %s", exc)
+
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        logger.warning("find_ds4_hidraw: ambiguous controller identity; refusing fallback")
+        return None
+    if normalized_uniq or input_device_path:
+        return None
+    return candidates[0] if len(candidates) == 1 else None
 
 
 def is_ds4_hidraw(hidraw_path: str) -> bool:

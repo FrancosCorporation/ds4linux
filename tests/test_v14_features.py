@@ -70,6 +70,48 @@ class TestMacroPersistence(unittest.TestCase):
         self.assertAlmostEqual(actions[1].delay, 0.05)
         self.assertEqual(actions[2].value, 0)
 
+    def test_dpad_output_mode_roundtrip_and_legacy_default(self):
+        from src.engine.input_mapper import ProfileConfig
+
+        profile = ProfileConfig(name="Button Dpad", dpad_output_mode="buttons")
+        self.assertTrue(self.pm.save_profile(profile.name, profile))
+        self.assertEqual(self.pm.load_profile(profile.name).dpad_output_mode, "buttons")
+
+        # Profiles created before this option existed keep the established
+        # HAT behavior; malformed values also fall back to that safe default.
+        self.assertEqual(self.pm._dict_to_profile({}).dpad_output_mode, "hat")
+        self.assertEqual(
+            self.pm._dict_to_profile({"dpad_output_mode": "invalid"}).dpad_output_mode,
+            "hat",
+        )
+
+    def test_profile_mapping_and_macro_targets_must_exist_on_virtual_device(self):
+        from evdev import ecodes as e
+
+        data = {
+            "device_type": "xbox",
+            "button_maps": {
+                str(e.BTN_SOUTH): e.BTN_A,
+                str(e.BTN_EAST): e.BTN_TRIGGER_HAPPY1,  # PS4-only output.
+                "999999": e.BTN_A,
+            },
+            "macros": {
+                str(e.BTN_NORTH): [
+                    {"action_type": "key", "code": e.BTN_TRIGGER_HAPPY1, "value": 1},
+                    {"action_type": "key", "code": e.BTN_A, "value": 1},
+                ],
+                "999999": [{"action_type": "key", "code": e.BTN_A, "value": 1}],
+            },
+        }
+        profile = self.pm._dict_to_profile(data)
+        self.assertEqual(profile.button_maps, {e.BTN_SOUTH: e.BTN_A})
+        self.assertEqual([a.code for a in profile.macros[e.BTN_NORTH]], [e.BTN_A])
+        self.assertNotIn(999999, profile.macros)
+
+    def test_unknown_stored_schema_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "unsupported profile schema"):
+            self.pm._dict_to_profile({"schema_version": 999})
+
     def test_macro_invalid_entries_skipped(self):
 
         raw = {
@@ -195,6 +237,18 @@ class TestProfileImportHardening(unittest.TestCase):
         self.assertIsNone(self.pm.import_profile(dest))
         self.assertFalse((Path(self._tmp.name) / "pwned").exists())
         self.assertFalse(Path(self._tmp.name).parent.joinpath("pwned").exists())
+
+    def test_import_rejects_future_schema_without_creating_profile(self):
+        from src.engine.input_mapper import ProfileConfig
+
+        self.pm.save_profile("Schema", ProfileConfig(name="Schema"))
+        dest = Path(self._tmp.name) / "future.ds4profile"
+        self.assertTrue(self.pm.export_profile("Schema", dest))
+        data = json.loads(dest.read_text())
+        data["_schema"] = 999
+        dest.write_text(json.dumps(data))
+        self.assertIsNone(self.pm.import_profile(dest, "Future"))
+        self.assertFalse(self.pm.get_profile_path("Future").exists())
 
     def test_import_rejects_fifo_without_blocking(self):
         import signal
@@ -483,6 +537,41 @@ class TestLEDControllerRumble(unittest.TestCase):
         self.assertEqual(report[4], 17)
         self.assertEqual(report[6:9], b"\xff\x00\x00")
 
+    def test_brightness_scales_hid_color_for_usb_and_bluetooth(self):
+        for transport, color_offset in (("usb", 6), ("bt", 8)):
+            with self.subTest(transport=transport):
+                led = self._make_led(transport)
+                led._current_color = (200, 100, 50)
+                led._rumble_left, led._rumble_right = 31, 17
+                with mock.patch.object(led, "_send_hid_report", return_value=True) as send:
+                    led.set_brightness(128)
+                report = send.call_args.args[0]
+                self.assertEqual(report[color_offset:color_offset + 3], bytes((100, 50, 25)))
+                if transport == "usb":
+                    self.assertEqual(report[4:6], bytes((17, 31)))
+                else:
+                    self.assertEqual(report[6:8], bytes((17, 31)))
+
+    def test_set_color_uses_current_brightness_on_hid_and_sysfs(self):
+        led = self._make_led("usb")
+        led._brightness = 64
+        led._colors_path = None
+        led._red_path = Path("/tmp/red")
+        led._green_path = Path("/tmp/green")
+        led._blue_path = Path("/tmp/blue")
+        writes = []
+        with (
+            mock.patch.object(led, "_send_hid_report", return_value=False) as send,
+            mock.patch.object(
+                led, "_write_sysfs_channel",
+                side_effect=lambda path, value: writes.append((path, value)) or True,
+            ),
+        ):
+            led.set_color(255, 128, 64)
+        report = send.call_args.args[0]
+        self.assertEqual(report[6:9], bytes((64, 32, 16)))
+        self.assertEqual([value for _path, value in writes], [64, 32, 16])
+
     def test_setters_publish_state_inside_hid_lock(self):
         """Color and motors feed the same HID output report and are written
         from different threads (GUI set_color, worker/DSU set_rumble): the
@@ -644,6 +733,26 @@ class TestFFHandshakePath(unittest.TestCase):
         # exist even while the device is inactive (was AttributeError).
         self.assertIsNone(vdev.uinput)
         self.assertFalse(vdev.is_active())
+
+    def test_virtual_key_capabilities_cover_default_trigger_button_maps(self):
+        from evdev import ecodes as e
+
+        from src.engine.virtual_device import VirtualDevice, VirtualDeviceType
+
+        for device_type in (VirtualDeviceType.XBOX, VirtualDeviceType.PS4):
+            caps, *_ = VirtualDevice(device_type)._build_capabilities()
+            self.assertIn(e.BTN_TL2, caps[e.EV_KEY])
+            self.assertIn(e.BTN_TR2, caps[e.EV_KEY])
+
+    def test_virtual_device_does_not_claim_pointing_stick_property(self):
+        from src.engine import virtual_device
+
+        with mock.patch.object(virtual_device, "UInput") as uinput:
+            vdev = virtual_device.VirtualDevice()
+            self.assertTrue(vdev.create())
+            kwargs = uinput.call_args.kwargs
+            self.assertNotIn("input_props", kwargs)
+            vdev.destroy()
 
     def _fake_vdev(self, events):
         vdev = mock.Mock()

@@ -1,418 +1,173 @@
 # DS4Linux
 
-## ℹ️ Sobre este repositório
+Aplicativo Linux que recebe eventos de controles Sony compatíveis identificados pelo código, traduz entradas evdev/HIDRAW para um dispositivo virtual Xbox 360 ou PS4 e oferece perfis, LEDs, vibração, macros e streaming de movimento DSU.
 
-Suporte a DualShock/DualSense no Linux (fork/estudo).
+A versão do aplicativo é a **2.0.0** e está registrada em [`CHANGELOG.md`](CHANGELOG.md). `version_2.0` é o nome da branch de desenvolvimento, alinhado a essa release.
 
-**DualShock 4 Emulator for Linux** - Use your PlayStation 4 controller as an Xbox or PlayStation 4 virtual controller on Linux.
+## O que está implementado
 
-## Features
+- Até dois controles atribuídos a slots independentes.
+- Emulação virtual por `uinput` como Xbox 360 ou PS4, com mapeamento de botões, eixos e gatilhos.
+- D-pad recebido por botões evdev, HAT evdev ou HIDRAW; perfil seleciona saída HAT (padrão) ou botões direcionais.
+- Ajustes de sticks e gatilhos, perfis JSON por slot, importação/exportação validada e macros de botões.
+- LEDs por relatório HID/sysfs e encaminhamento de vibração EV_FF quando o controle e o sistema oferecem esses recursos.
+- Auto-perfis usando a janela em primeiro plano no X11. Em Wayland o aplicativo informa que não confirma o foco e exige seleção manual.
+- Servidor de movimento CemuHook/DSU UDP em `127.0.0.1:26760`.
+- Diagnóstico Leituras para comparar evento físico, mapeamento e saída virtual, com captura local limitada e exportação sem identificadores do dispositivo.
+- Testes automatizados e workflow GitHub Actions para a branch `version_2.0`.
 
-- **Multi-controller support** - Up to 2 DS4 controllers simultaneously (USB/Bluetooth)
-- **Xbox 360 / XInput emulation** - Play any game with native Xbox controller support
-- **PlayStation 4 / DS4 emulation** - Native PS4 support for Steam and compatible games
-- **Proton/Wine compatibility** - Virtual device with USB bustype, INPUT_PROP_GAMEPAD, BTN_GAMEPAD for AAA games via Heroic/Lutris/Proton
-- **Zero sudo required** - udev rules grant user-space access to controller and uinput
-- **Exclusive device grab** - Prevents double input (both physical + virtual)
-- **LED lightbar control** - Full RGB control via HID output reports (78 bytes, BT format) + sysfs brightness for virtual display
-- **Advanced stick/trigger tuning** - Deadzone, max zone, anti-deadzone, sensitivity, output curve, square stick, rotation
-- **Per-controller profiles** - Independent profiles per controller slot (JSON)
-- **Visual button mapping** - DS4 outline with clickable mapping list
-- **Touchpad configuration** - Mouse mode, controls mode, gestures, jitter compensation
-- **Gyro support** - Mouse emulation, sensitivity, calibration
-- **Rumble forwarding** - EV_FF/FF_RUMBLE from games forwarded to physical controller via select()-based async I/O
-- **System tray integration** - Minimize to tray, runs in background
-- **DS4Windows-style UI** - Clickable DS4 artwork (D-pad, face buttons, shoulders, sticks, touchpad) with live highlight, per-button mapping list (listen/edit/remove/reset), Axis/Lightbar/Gyro/Other tabs, integrated log and dark theme
-- **Background daemon** - QThread-based event loop, never blocks GUI
-- **D-pad hardened** - Correct HAT handling for hid-sony (BTN_DPAD_*), hid-playstation (ABS_HAT) and HIDRAW; no stuck diagonals, no duplicate writes
-- **Automated tests + CI** - 178 unit/smoke tests (D-pad regression, HID report parser, worker paths, macros, DSU protocol, FF upload ABI, battery, profile import hardening, offscreen GUI) and GitHub Actions workflow
-- **Configurable polling** - 1/2/4/10 ms worker tick per profile
-- **Auto profiles** - Switch profiles automatically per foreground game (X11 xprop + process fallback), DS4Windows-style
-- **Macros** - Record button sequences per physical button (macro editor with live capture), persisted in the profile JSON
-- **Profile import/export** - Share profiles as portable `.ds4profile` files
-- **CemuHook (DSU) motion server** - UDP motion streaming (100 Hz) for Cemu/Yuzu/Ryujinx/Citra from DS4 sensors
-- **Proportional rumble** - Real strong/weak magnitudes captured via the uinput FF upload handshake (UI_FF_UPLOAD)
-- **On-screen display** - Toast notifications for connection, battery and auto-profile switches (click-through overlay)
+Mouse pelo giroscópio, calibração, gestos/modos do touchpad, modos dinâmicos de LED e ajuste de intensidade da vibração por perfil ainda não estão implementados; os controles correspondentes aparecem desativados na interface. O fluxo de movimento do giroscópio para DSU continua disponível. A funcionalidade depende do controle, do kernel e das permissões; a suíte automatizada não substitui a validação física em jogos.
 
-## Architecture
+## Controles reconhecidos pelo código
 
-```
-ds4linux/
-├── udev/                          # udev rules for non-root access
-│   └── 99-ds4linux.rules          # Controller + uinput + LED permissions
-├── assets/                        # Icons, controller images
-├── src/
-│   ├── constants.py               # evdev/uinput codes, button maps, axis maps, version
-│   ├── main.py                    # Entry point: QApplication, main window, signal handling
-│   │
-│   ├── engine/                    # Core input processing engine
-│   │   ├── device_monitor.py      # pyudev hot-plug detection (add/remove DS4 via udev netlink)
-│   │   ├── device_manager.py      # Scans /dev/input, filters real DS4 (VID/PID), calls grab()
-│   │   ├── controller_slot.py     # Per-controller state machine: attach/detach, LED, profile, worker lifecycle
-│   │   ├── dpad.py                # D-pad/HAT state machine shared by evdev + HIDRAW
-│   │   ├── ds4_hidraw.py          # HIDRAW fallback: report parser (buttons/sticks/HAT), device discovery
-│   │   ├── battery.py             # Battery level sources (sysfs power supply + DS4 status byte)
-│   │   ├── system_checker.py      # Environment checks (uinput/permissions/hidraw) for first-run diagnostics
-│   │   ├── auto_profile.py        # Auto-profile switcher: X11 foreground detection, rules, timers
-│   │   ├── macro_engine.py        # Macro playback engine (key/wait actions on a worker thread)
-│   │   ├── ff_upload.py           # ctypes bindings for the uinput FF upload handshake (rumble magnitudes)
-│   │   ├── cemuhook_server.py     # CemuHook (DSU) UDP motion server for emulators
-│   │   ├── worker_thread.py       # QThread: select()-based I/O on physical fd + uinput fd
-│   │   │                          #   → maps buttons/axes physical→virtual (EV_KEY, EV_ABS)
-│   │   │                          #   → forwards rumble virtual→physical (EV_FF → device.write)
-│   │   │                          #   → answers UI_FF_UPLOAD/ERASE for proportional rumble
-│   │   ├── virtual_device.py      # UInput factory: Xbox 360 / PS4 emulation
-│   │   │                          #   → bustype=USB, INPUT_PROP_GAMEPAD, BTN_GAMEPAD, EV_FF/FF_RUMBLE
-│   │   │                          #   → phys=ds4linux-uinput-<slot> (prevents monitor self-detection)
-│   │   ├── input_mapper.py        # DS4→virtual translation: deadzone, sensitivity, anti-deadzone,
-│   │   │                          #   output curve, square stick, rotation per stick/trigger
-│   │   ├── led_controller.py      # /sys/class/leds/ RGB control (virtual display) + HID output report (78 bytes) for physical LED
-│   │   │                          #   LED path via sysfs device symlink matching
-│   │   ├── motion_source.py       # DS4 accel/gyro parsing from hidraw reports + DSU motion provider
-│   │   └── multi_device_manager.py # Manages 2 slots, HID parent grouping (gamepad+sensors+touchpad),
-│   │                              #   device assignment, reconnect on BT change, apply_profile_to_all
-│   │
-│   ├── config/
-│   │   └── profile_manager.py     # JSON profile CRUD in ~/.config/ds4linux/profiles/
-│   │                              #   Per-slot independent profiles with button_maps, axis config,
-│   │                              #   LED color/brightness, device type, touchpad/gyro settings
-│   │
-│   └── gui/                       # PySide6 dark UI (DS4Windows-inspired)
-│       ├── main_window.py         # Tab container: Controllers, Profiles, Auto Profiles, Settings, Log
-│       │                          #   SVG icon loading, system tray, about dialog
-│       ├── controllers_table.py   # Table view: slot ID, status, battery, profile combo, LED color cell,
-│       │                          #   edit button → opens ControllerTab
-│       ├── auto_profiles_tab.py   # Auto-profile rules editor (add/remove/enable, process match)
-│       ├── setup_dialog.py        # First-run/system-check dialog (uinput, permissions, hidraw)
-│       ├── controller_tab.py      # Per-controller profile editor:
-│       │                          #   MappingTabWidget (overlay interativo + wizard)
-│       │                          #   LightbarWidget (HSV picker, presets, brightness slider)
-│       │                          #   AxisConfigWidget (LS/RS/L2/R2 spinboxes, curves, square stick)
-│       │                          #   TouchpadWidget, GyroWidget, OtherWidget
-│       │                          #   Profile load/save/cancel, device type switch
-│       ├── mapping_tab.py         # Clickable controller overlay + mapping list:
-│       │                          #   ControllerOverlayWidget (asset + hotspots de todas as teclas)
-│       │                          #   ListenDialog (captura evento bruto), TargetPickerDialog
-│       ├── color_dialog.py        # Custom HSV color wheel dialog (ported from DS4Windows C#)
-│       ├── macro_dialog.py        # Macro editor: record button sequences with live capture
-│       ├── osd_overlay.py         # Frameless toast overlay (connection/battery/profile notices)
-│       └── styles.py              # QSS dark theme: #1e1e2e bg, #00d4aa accent, rounded corners
-│
-├── install.sh                     # System installer:
-│   │                              #   → apt/pip dependencies, venv, udev rules
-│   │                              #   → SVG→PNG icon conversion (QtSvg), desktop entry
-│   │                              #   → /usr/local/bin/ds4linux launcher script
-│   │                              #   → chown/chmod existing LED sysfs (udevadm trigger doesn't reapply)
-├── requirements.txt               # python-evdev, PySide6, pyudev
-├── pyproject.toml                 # metadata + ruff config
-├── .github/workflows/tests.yml     # CI: unittest (offscreen Qt) + ruff
-├── tests/                         # unittest suite (D-pad, HID parser, worker, DSU, GUI smoke)
-└── README.md
-```
+A descoberta usa VID Sony `054c` e os PIDs `09cc`, `0ba0` e `05c4`, conforme `src/constants.py`. Essa lista significa que os IDs são reconhecidos pelo programa; não é uma certificação de compatibilidade em cada conexão, recurso ou jogo. PID `0ce6` não está incluído na lista atual. Compatibilidade com Steam Input, SDL, Proton/Wine e jogos específicos ainda requer teste no equipamento e runtime correspondentes.
 
-### Data Flow
+## Instalação
 
-```
-DS4 (USB/BT)                    DS4Linux                          Game (Proton/Wine)
-─────────────                   ──────────                        ──────────────────
- event18 (gamepad) ──grab()──→ worker_thread
- event19 (sensors)              │ read_loop()
- event20 (touchpad)             │
-                                ├── EV_KEY/EV_ABS ──→ input_mapper ──→ virtual_device.write()
-                                │   (DS4 buttons)      (mapping)       (EV_KEY/EV_ABS to uinput)
-                                │                                         │
-                                │                                         ▼
-                                │                                   /dev/input/event21
-                                │                                   "Sony Interactive
-                                │                                    Entertainment
-                                │                                    Wireless Controller"
-                                │                                         │
-                                │                                    Game reads events
-                                │                                    (buttons, sticks)
-                                │
-                                ├── EV_FF (rumble) ←──── game writes FF ──→ uinput fd
-                                │   select() on uinput_fd                  │
-                                │   device.write(EV_FF, code, value) ─────→ DS4 hardware
-                                │                                         (physical vibration)
-                                │
-                                                                                        └── LED sysfs ──→ /sys/class/leds/input88:{red,green,blue}/brightness (virtual display)
-                                                                                        └── HID output report (78 bytes, BT format, hw_control=0xC4) ──→ physical LED
-```
+### Instalação pelo pacote gráfico (Ubuntu 26.04 / Debian 13)
 
-## Quick Start
+O pacote `.deb` instala o aplicativo, as dependências, o ícone, a entrada do menu e as regras udev. Para quem usa o computador, o fluxo é baixar o `.deb`, abrir o arquivo no instalador gráfico da distribuição e confirmar a instalação administrativa uma vez. Depois, basta abrir **DS4Linux** pelo menu; o aplicativo roda como usuário normal e não abre um assistente de privilégios na primeira execução. As dependências Qt usadas pelo pacote existem nos repositórios oficiais de [Ubuntu 26.04](https://packages.ubuntu.com/resolute/amd64/python3-pyside6.qtwidgets) e [Debian 13](https://packages.debian.org/trixie/python3-pyside6.qtwidgets).
 
-### 🚀 One-Command Install (Recommended)
+Ainda não há `.deb` publicado na seção Releases. O pacote de teste pode ser gerado localmente com `packaging/deb/build-deb.sh`. O projeto é distribuído sob a licença [MIT](LICENSE), o que permite redistribuição do pacote nos mesmos termos. Este pacote inicial é direcionado a Ubuntu 26.04 e Debian 13; não anuncia suporte a outras distribuições.
+
+As regras do pacote ficam em `/usr/lib/udev/rules.d/99-z-ds4linux.rules`. O udev processa arquivos em ordem lexical, conforme a [documentação do systemd](https://cgit.freedesktop.org/systemd/systemd/tree/man/udev.xml); assim, a regra segura atualiza permissões deixadas pelo antigo instalador em `/etc/udev/rules.d/99-ds4linux.rules`, sem apagar nem editar esse arquivo. Uma personalização administrativa com o mesmo nome `99-z-ds4linux.rules` continua sendo respeitada e aparece no diagnóstico do app. Após instalar ou atualizar, reconecte um controle que já estava ligado para aplicar as permissões novas.
+
+### Instalação manual a partir do código
+
+Este caminho é voltado a desenvolvimento e distribuições sem o pacote `.deb`. O instalador de sistema requer privilégios para dependências, launcher, entrada desktop e regras udev. Inicie a interface pela sessão do usuário; não execute o DS4Linux como root.
 
 ```bash
 git clone https://github.com/FrancosCorporation/ds4linux.git
 cd ds4linux
 sudo ./install.sh
+ds4linux
 ```
 
-**That's it!** The installer handles everything:
-- System dependencies (python3, libevdev, libxcb-cursor0, PySide6)
-- Python virtual environment with all packages
-- udev rules for non-root controller access
-- Desktop entry + icon for application menu
-- `ds4linux` command in `/usr/local/bin`
+As regras udev usam grupo `input`, modo `0660` e `uaccess` para a sessão ativa. Não é necessário tornar `/dev/uinput`, HIDRAW ou LEDs graváveis por todos. Reconecte o controle depois de instalar ou atualizar as regras. Se a sessão não receber acesso, confira a ACL e a regra instalada antes de alterar grupos ou permissões manualmente.
 
-Then run `ds4linux` from terminal or find **"DS4Linux"** in your application menu.
+### Instalação manual
 
-### Manual Installation (Alternative)
+Instale Python 3.10 ou mais recente, os cabeçalhos/runtime de evdev e os componentes Qt necessários à sua distribuição. Em Debian/Ubuntu, por exemplo:
 
 ```bash
-# Install system dependencies
-# Ubuntu/Debian:
-sudo apt install python3 python3-pip python3-venv libevdev2 libevdev-dev libxcb-cursor0
-
-# Arch:
-sudo pacman -S python python-pip python-virtualenv libevdev libxcb
-
-# Fedora:
-sudo dnf install python3 python3-pip python3-virtualenv libevdev libevdev-devel libxcb
-
-# Create venv & install
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-
-# Install udev rules (requires root)
-sudo cp udev/99-ds4linux.rules /etc/udev/rules.d/
-sudo udevadm control --reload-rules && sudo udevadm trigger
-
-# Add your user to input group
-sudo usermod -a -G input $USER
-# Log out and back in
-
-# Run
-python3 -m src.main
+sudo apt install python3 python3-pip python3-venv python3-dev build-essential \
+  libevdev2 libevdev-dev libxcb-cursor0 libegl1
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -r requirements.txt
+python -m src.main
 ```
 
-## Usage
-
-1. **Connect your DS4** via USB or Bluetooth (up to 2 controllers)
-2. **Launch DS4Linux** - it will auto-detect controllers
-3. **Controllers tab** - View all connected controllers in a table (ID, Status, Battery, Profile, LED color)
-4. **Click "Editar"** on a controller row - Opens per-controller Profile tab
-5. **Configure** in Profile tab:
-   - **Controls** - Visual DS4 mapping, Touchpad mode, button list
-   - **Axis Config** - LS/RS/L2/R2 deadzone, maxzone, anti-deadzone, sensitivity, curves
-   - **Lightbar** - Color picker, brightness, presets, battery gradient
-   - **Gyro** - Enable, mouse mode, sensitivity, calibration
-   - **Other** - Rumble, LED behavior, auto-reconnect
-6. **Save Profile** - Settings persist per controller slot
-7. **Minimize to tray** - Close window to keep running in background
-
-## GUI Overview (DS4Windows-style)
-
-### Main Tabs
-| Tab | Description |
-|-----|-------------|
-| **Controllers** | Table view of all controller slots with status, battery, profile dropdown, LED color, edit button |
-| **Profiles** | Placeholder - select controller from Controllers tab |
-| **Auto Profiles** | Add, edit, enable, and remove rules that switch profiles by matching the foreground game/process |
-| **Settings** | Startup options, udev installer, about |
-| **Log** | Real-time event log |
-
-### Per-Controller Profile Tab (opened via "Editar")
-- **Header**: Profile name, Save/Cancel, Keep window size
-- **Controls**: Visual DS4 outline + mapping list + Touchpad settings
-- **Axis Config**: LS/RS/L2/R2 advanced tuning (deadzone, maxzone, anti-deadzone, sensitivity, output curve, square stick, rotation)
-- **Lightbar**: HSV color picker, presets, brightness, battery gradient colors
-- **Gyro**: Enable, mouse mode, sensitivity, calibration
-- **Other**: Rumble intensity, LED behavior modes, connection settings
-- **Footer**: Status, Hotkeys/About link, Stop button
-
-## Supported Controllers
-
-| Controller | USB VID:PID | Bluetooth VID:PID | Status |
-|------------|-------------|-------------------|--------|
-| DualShock 4 v1 | 054c:09cc | 054c:0ba0 | ✅ Full |
-| DualShock 4 v2 | 054c:09cc | 054c:0ba0 | ✅ Full |
-| DualSense (PS5) | 054c:0ce6 | - | ⚠️ Basic |
-
-## Virtual Device Types
-
-| Type | Vendor:Product | Bustype | Features |
-|------|----------------|---------|----------|
-| Xbox 360 | 045e:028e | USB (0x03) | BTN_GAMEPAD, INPUT_PROP_GAMEPAD, EV_FF rumble |
-| PS4 / DS4 | 054c:09cc | USB (0x03) | BTN_GAMEPAD, INPUT_PROP_GAMEPAD, EV_FF rumble |
-
-*Each controller slot can independently emulate Xbox or PS4*
-
-### Proton/Wine Compatibility
-
-Virtual devices are created with characteristics expected by Windows game APIs running under Proton/Wine:
-- **USB bustype** (0x03) - Required by SDL/XInput device enumeration
-- **INPUT_PROP_GAMEPAD** - Kernel property flag for gamepad recognition
-- **BTN_GAMEPAD** - Standard gamepad button code for input mapping
-- **phys=ds4linux-uinput-\<slot\>** - Unique physical address per slot, prevents self-detection by the monitor
-- **EV_FF/FF_RUMBLE** - Force feedback events from games are forwarded to the physical controller
-
-Start DS4Linux **before** launching your game via Heroic, Lutris, or Proton.
-
-## Configuration
-
-Profiles stored in `~/.config/ds4linux/profiles/*.json`:
-
-```json
-{
-  "name": "My Profile",
-  "device_type": "xbox",
-  "button_maps": { "304": 304, "305": 305, ... },
-  "left_stick": { "deadzone": 0.15, "sensitivity": 1.0, "inverted": false },
-  "right_stick": { "deadzone": 0.15, "sensitivity": 1.0, "inverted": false },
-  "left_trigger": { "deadzone": 0.05, "sensitivity": 1.0 },
-  "right_trigger": { "deadzone": 0.05, "sensitivity": 1.0 },
-  "led_color": [0, 212, 170],
-  "led_brightness": 255
-}
-```
-
-## Building from Source
+Para instalar as regras udev manualmente:
 
 ```bash
-# Development install (editable)
-pip install -e .
-
-# Run directly
-python3 -m src.main
+sudo install -D -m 0644 udev/99-ds4linux.rules /etc/udev/rules.d/99-ds4linux.rules
+sudo udevadm control --reload-rules
+sudo udevadm trigger
 ```
 
-## Troubleshooting
+O aplicativo abre mesmo quando o ambiente manual não tem as regras udev. A aba **Configurações** mostra o estado e oferece uma reparação opcional; a senha, quando necessária, é solicitada pelo sistema e nunca é guardada pelo app. A instalação normal do pacote não usa esse fluxo: o gerenciador de pacotes aplica as regras antes da primeira abertura.
 
-**Controller not detected:**
-- Ensure udev rules installed: `ls /etc/udev/rules.d/99-ds4linux.rules`
-- Reload: `sudo udevadm control --reload-rules && sudo udevadm trigger`
-- Check groups: `groups $USER` should include `input`
-- Reboot after group changes
+### Geração local do pacote Debian
 
-**Permission denied on /dev/uinput:**
-- Check udev rule for uinput exists
-- Verify: `ls -la /dev/uinput` should be `crw-rw-rw-`
+```bash
+packaging/deb/build-deb.sh
+```
 
-**D-pad stuck / wrong directions:**
-- Fixed since v1.4.0: the worker keeps pressed directions in a set (`src/engine/dpad.py`), so releasing one arrow during a diagonal no longer leaves a stuck axis
-- Covered by `tests/test_dpad.py`, `tests/test_worker_dpad.py` and `tests/test_ds4_hidraw.py`; run `python -m unittest discover -s tests`
-- If a clone emulates the D-pad as `BTN_DPAD_*` (hid-sony) or `ABS_HAT0X/Y` (hid-playstation), both paths are handled
+O arquivo `.deb` aparece em `dist/`. A construção não instala o pacote nem altera o host. A arquitetura é `all`; o instalador declara as dependências Python/Qt e executa apenas um reload não interativo das regras udev.
 
-**Double input (both physical + virtual):**
-- DS4Linux uses `evdev.grab()` for exclusive access
-- Ensure no other tools (steam, ds4drv) are grabbing the device
+## Desenvolvimento e testes
 
-**LED not working:**
-- Requires kernel 5.10+ with `hid_playstation` module
-- Check: `ls /sys/class/leds/` for `*::kbd_backlight` or similar
+Instalação editável:
 
-**Game doesn't recognize controller (Proton/Wine):**
-- Start DS4Linux **before** launching the game
-- Disable Steam Input if using Steam
-- Try switching virtual device type (Xbox/PS4) in profile
-- Check `evtest /dev/input/eventXX` - virtual device should show `bustype=0x3` and `BTN_GAMEPAD`
+```bash
+python -m pip install -e .
+python -m src.main
+```
 
-**Rumble not working:**
-- Ensure game is not running through Steam Input (which intercepts FF)
-- Test with `evtest` - write FF event to virtual node, check physical output
+Ambiente equivalente ao job automatizado (Python 3.12, Linux x86_64):
 
-**Qt platform plugin error (xcb):**
-- Install: `sudo apt install libxcb-cursor0` (Ubuntu/Debian)
-- Or use Wayland: `QT_QPA_PLATFORM=wayland ds4linux`
+```bash
+python -m pip install -r requirements-ci.txt
+QT_QPA_PLATFORM=offscreen python -m unittest discover -s tests -v
+ruff check src tests
+```
 
-## Roadmap
+`requirements-ci.txt` fixa as dependências diretas e transitivas usadas pela CI e pode ser recompilado com:
 
-### v1.0.0 - Core Engine (Done)
-- [x] DS4 detection via udev (USB + Bluetooth)
-- [x] Exclusive device grab (evdev)
-- [x] Xbox 360 virtual device emulation (uinput)
-- [x] PS4 virtual device emulation (uinput)
-- [x] Button mapping (DS4 → Xbox / DS4 → PS4)
-- [x] Axis mapping with deadzone, sensitivity, anti-deadzone
-- [x] Trigger mapping (L2/R2)
-- [x] D-pad mapping
-- [x] Per-slot controller architecture
-- [x] QThread background event loop (zero GUI lag)
+```bash
+uv pip compile pyproject.toml --group dev --python-version 3.12 \
+  --python-platform x86_64-unknown-linux-gnu -o requirements-ci.txt
+```
 
-### v1.1.0 - LED & UI (Done)
-- [x] LED lightbar control via `/sys/class/leds/` (virtual display)
-- [x] HID output reports (78 bytes, BT format) for physical LED lightbar
-- [x] RGB color picker (HSV)
-- [x] LED presets (solid, pulse, rainbow, battery gradient)
-- [x] Per-profile LED colors
-- [x] Two-controller LED differentiation (per-slot input path)
-- [x] udev rules for non-root LED access
-- [x] install.sh LED permission fix (chown/chmod for existing devices)
-- [x] Dark/minimalist UI (DS4Windows-inspired)
-- [x] Controllers table (status, battery, profile, LED, edit)
-- [x] Per-controller profile tabs (Controls, Axis, Lightbar, Gyro, Other)
-- [x] Visual button mapping with DS4 outline
-- [x] Touchpad configuration (mouse/controls mode, gestures)
-- [x] Gyro support (mouse emulation, sensitivity, calibration)
-- [x] System tray integration
-- [x] SVG icon + desktop entry
+Build do wheel:
 
-### v1.2.0 - Proton/Wine Compatibility (Done)
-- [x] USB bustype (0x03) on virtual device
-- [x] INPUT_PROP_GAMEPAD kernel property flag
-- [x] BTN_GAMEPAD explicit capability
-- [x] EV_FF/FF_RUMBLE declaration + force feedback forwarding
-- [x] select()-based async I/O for rumble (physical ↔ virtual)
-- [x] Unique phys per slot (ds4linux-uinput-\<slot\>)
-- [x] PS4 name: "Sony Interactive Entertainment Wireless Controller"
-- [x] HID output reports (78 bytes, BT format, hw_control=0xC4) for physical LED lightbar
-- [x] HID output report forwarding for games that bypass evdev
-- [x] README + documentation
+```bash
+python -m pip install build
+python -m build --wheel
+```
 
-### v1.3.0 - In Progress
-- [x] **ControllerTab UI refactor** - QScrollArea, QSizePolicy, margin/spacing cleanup, slider redesign, controller diagram L2/R2
-- [x] **MappingTab interativo** - Overlay sobre imagem do controle, Listen Mode, Wizard de mapeamento rápido
-- [x] **LEDController multi-fallback** - Detecção hid-sony/hid-playstation, HID report + sysfs colors/brightness
-- [x] **WorkerThread raw_event** - Sinal para captura de eventos brutos pela UI
-- [x] **udev access hardened** - MODE="0660", input group, and active-seat `uaccess`; installer adds only the invoking desktop user to `input`
-- [ ] **God of War verification** - End-to-end test with Heroic/Proton
-- [ ] **SDL GUID validation** - Confirm virtual device GUID matches expected Xbox/PS4 signatures
-- [x] **Rumble magnitude mapping** - Proportional forwarding via the uinput FF upload handshake (strong/weak magnitudes → physical motors)
+Os testes cobrem tradução sintética evdev/HIDRAW, frames e recuperação, perfil, ciclo de vida, GUI offscreen, instalação em diretório temporário e recursos do wheel. A leitura/escrita real de `/dev/input`, `uinput`, HIDRAW, LEDs, vibração, Steam Input e jogos ainda depende de validação física.
 
-### v1.4.0 - In Progress
-- [x] **D-pad hardening** - Shared HAT state machine (evdev BTN_DPAD / ABS_HAT + HIDRAW), regression tests
-- [x] **DS4Windows-style Controls UI** - Clickable overlay for every button, mapping list, target picker
-- [x] **Test suite + CI** - 178 tests (unittest, offscreen Qt) + ruff + GitHub Actions
-- [x] **Configurable polling** - 1/2/4/10 ms worker tick saved per profile
-- [x] **Tray + integrated log** - System tray menu and live log tab
-- [x] **Auto-profiles** - Switch profiles automatically per game (X11 xprop foreground detection + process scan fallback)
-- [x] **Profile import/export** - Share profiles as `.ds4profile` files
-- [x] **Macro support** - Record and playback button sequences (macro editor with live capture, persisted per profile)
-- [x] **On-screen display (OSD)** - Battery/connection/auto-profile toast overlay
-- [x] **CemuHook (DSU) motion server** - 100 Hz UDP motion streaming from DS4 sensors for emulators
-- [ ] **DualSense (PS5) full support** - Adaptive triggers, haptic feedback, microphone LED
-- [ ] **Steam Input compatibility** - Coexist with Steam Input without conflicts
+## Fluxo de entrada
 
-### v2.0.0 - Community & Ecosystem
-- [ ] **Multi-controller beyond 2** - Support 4+ controllers
-- [ ] **Xbox controller passthrough** - Use DS4Linux as a configuration layer for Xbox controllers too
-- [ ] **Motion aim integration** - Gyro-based aiming for FPS games (Steam Input style)
-- [ ] **Community profile repository** - Browse and download shared profiles
-- [ ] **Flatpak / AppImage packaging** - Universal Linux distribution
-- [ ] **AUR / RPM / DEB packages** - Native package manager support
-- [ ] **Wayland native support** - Full functionality under Wayland without XWayland
-- [ ] **CLI daemon mode** - Headless operation for servers / embedded setups
-- [ ] **Gamepad tester** - Built-in input visualization and diagnostics tool
-- [ ] **HID report forwarding** - Direct HID communication for games that bypass evdev
+```text
+Controle físico ── evdev exclusivo ─┐
+                                    ├─ normalização/mapeamento ─ uinput ─ jogo
+Controle físico ── HIDRAW opcional ─┘
+Jogo ── EV_FF ─ worker ─ HID/evdev ─ controle físico
+Controle ── acelerômetro/giroscópio ─ DSU UDP em loopback ─ emulador
+```
 
-## License
+Quando existe um dispositivo evdev, o programa exige `EVIOCGRAB` exclusivo. Se Steam Input, `ds4drv` ou outro serviço já o capturou, o DS4Linux recusa criar saída virtual paralela e mostra a ação recomendada. A execução simultânea do controle físico e virtual pode duplicar entradas; escolha apenas um caminho de captura.
 
-MIT License - See LICENSE file for details.
+## Perfis
 
-## Contributing
+Perfis e configuração do usuário ficam em:
 
-1. Fork the repository
-2. Create feature branch: `git checkout -b feature/amazing-feature`
-3. Commit changes: `git commit -m 'Add amazing feature'`
-4. Push to branch: `git push origin feature/amazing-feature`
-5. Open a Pull Request
+- `~/.config/ds4linux/profiles/<nome>.json`
+- `~/.config/ds4linux/config.json`
 
-## Acknowledgments
+Os perfis usam schema `1`, `device_type` (`xbox` ou `ps4`) e `dpad_output_mode` (`hat` ou `buttons`), além de mapas de botões, eixos, gatilhos, LED, polling e macros. Arquivos importados são validados; versões de schema desconhecidas são recusadas. Os códigos dos mapas são códigos Linux `EV_KEY`, não nomes de teclas SDL.
 
-- [evdev](https://github.com/gvalkov/python-evdev) - Linux input event library
-- [PySide6](https://wiki.qt.io/Qt_for_Python) - Qt6 Python bindings
-- [DS4Windows](https://github.com/Ryochan7/DS4Windows) - UI/UX inspiration
-- Linux kernel `hid_playstation` and `uinput` subsystems
+## Diagnóstico
+
+- **O controle não conecta:** reconecte após instalar as regras; confira acesso ao nó `event*` e a `/dev/uinput`; procure erros de `EVIOCGRAB` no log.
+- **Steam Input ou outro serviço já capturou o controle:** desative uma das rotas, desconecte/reconecte o controle e tente novamente. O programa não cria uma segunda entrada física/virtual quando o grab falha.
+- **Setas não navegam no jogo:** na aba de perfil, use “Diagnóstico do fluxo” e capture uma pressão e soltura. Confira evento físico, mapeamento e saída virtual; teste o perfil com HAT ou botões direcionais. A captura confirma o que o DS4Linux escreveu, não o que o jogo consumiu.
+- **Jogo não reconhece o virtual:** inicie DS4Linux antes do jogo, confira o nó virtual com `evtest` e teste Xbox/PS4. O resultado depende do jogo, SDL/Steam Input e runtime; não há compatibilidade universal declarada.
+- **LED ou vibração sem resposta:** confirme suporte do driver/controle e permissões udev; consulte o log para distinguir falta de caminho, acesso negado e erro do dispositivo.
+- **Auto-perfil em Wayland:** seleção automática pelo foco não é confirmada; selecione o perfil manualmente.
+- **Qt/XCB:** em Debian/Ubuntu, instale `libxcb-cursor0`; use a sessão Qt suportada pelo ambiente desktop.
+
+Para reproduzir a regressão automatizada do D-pad:
+
+```bash
+QT_QPA_PLATFORM=offscreen python -m unittest tests.test_dpad tests.test_worker_dpad -v
+```
+
+## Estado do projeto
+
+O backlog de tarefas, dependências, evidências, resultados por sessão, validação física pendente e propostas futuras está em [plan.md](plan.md). O histórico de implementação e testes está em [resumo.md](resumo.md). O nome da branch não altera a versão do aplicativo.
+
+As mudanças de cada versão estão em [CHANGELOG.md](CHANGELOG.md). Releases publicadas acompanham as tags do repositório.
+
+## Contribuição
+
+O fluxo completo — ambiente, suíte, lint, estilo de commit e o que é revisado — está em [CONTRIBUTING.md](CONTRIBUTING.md). Resumindo:
+
+1. Crie uma branch para a alteração.
+2. Acrescente testes de regressão para o contrato alterado.
+3. Execute a suíte offscreen e `ruff check src tests`.
+4. Atualize `CHANGELOG.md`, `plan.md` e `resumo.md` quando o backlog ou o estado validado mudar.
+
+## Licença
+
+Este projeto é publicado sob a licença [MIT](LICENSE).
+
+## Agradecimentos
+
+- [python-evdev](https://github.com/gvalkov/python-evdev)
+- [PySide6 / Qt for Python](https://wiki.qt.io/Qt_for_Python)
+- [pyudev](https://pyudev.readthedocs.io/)
+- Subsistemas `hid-playstation` e `uinput` do kernel Linux

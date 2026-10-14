@@ -2,12 +2,9 @@ import logging
 
 from PySide6.QtCore import Qt, QThread, Signal, Slot
 from PySide6.QtWidgets import (
-    QCheckBox,
     QDialog,
-    QGroupBox,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
     QMessageBox,
     QProgressBar,
     QPushButton,
@@ -24,13 +21,11 @@ class _SetupWorker(QThread):
     progress_signal = Signal(int, str)
     finished_signal = Signal(bool, list)
 
-    def __init__(self, password: str):
+    def __init__(self):
         super().__init__()
-        self._password = password
 
     def run(self):
         from ..engine.system_checker import (
-            _fix_led_permissions,
             install_udev_rules,
             is_module_loaded,
             is_udev_rules_installed,
@@ -39,67 +34,66 @@ class _SetupWorker(QThread):
         )
 
         messages = []
-
-        self.progress_signal.emit(10, "Verificando driver do kernel...")
-        if not is_module_loaded():
-            self.log_signal.emit("Carregando módulo hid-playstation...")
-            if load_module(password=self._password):
-                messages.append("✅ Driver hid-playstation carregado")
+        try:
+            self.progress_signal.emit(10, "Verificando driver do kernel...")
+            if not is_module_loaded():
+                self.log_signal.emit("Carregando módulo hid-playstation...")
+                if load_module():
+                    messages.append("✅ Driver hid-playstation carregado")
+                else:
+                    messages.append("❌ Falha ao carregar hid-playstation")
+                    self.finished_signal.emit(False, messages)
+                    return
             else:
-                messages.append("❌ Falha ao carregar hid-playstation")
-                self.finished_signal.emit(False, messages)
-                return
-        else:
-            messages.append("✅ Driver hid-playstation ativo")
-            self.log_signal.emit("Driver hid-playstation já carregado")
+                messages.append("✅ Driver hid-playstation ativo")
+                self.log_signal.emit("Driver hid-playstation já carregado")
 
-        self.progress_signal.emit(40, "Verificando regras udev...")
-        if not is_udev_rules_installed():
-            self.log_signal.emit("Instalando regras udev...")
-            ok, msg = install_udev_rules(password=self._password)
-            if ok:
-                messages.append("✅ Regras udev instaladas")
+            self.progress_signal.emit(40, "Verificando regras udev...")
+            if not is_udev_rules_installed():
+                self.log_signal.emit("Instalando regras udev...")
+                ok, msg = install_udev_rules()
+                if ok:
+                    messages.append("✅ Regras udev instaladas")
+                else:
+                    messages.append(f"❌ Falha ao instalar regras udev: {msg}")
+                    self.finished_signal.emit(False, messages)
+                    return
             else:
-                messages.append(f"❌ Falha ao instalar regras udev: {msg}")
-                self.finished_signal.emit(False, messages)
-                return
-        else:
-            messages.append("✅ Regras udev já instaladas")
-            self.log_signal.emit("Regras udev já instaladas")
+                messages.append("✅ Regras udev já instaladas")
+                self.log_signal.emit("Regras udev já instaladas")
 
-        self.progress_signal.emit(60, "Corrigindo permissões de LED...")
-        self.log_signal.emit("Corrigindo permissões dos LEDs...")
-        _fix_led_permissions(password=self._password)
-        messages.append("✅ Permissões de LED corrigidas")
+            self.progress_signal.emit(70, "Procurando controles...")
+            self.log_signal.emit("Escaneando controles conectados...")
+            devices = scan_ds4_devices()
 
-        self.progress_signal.emit(80, "Procurando controles...")
-        self.log_signal.emit("Escaneando controles conectados...")
-        devices = scan_ds4_devices()
+            if devices:
+                for dev in devices:
+                    messages.append(f"✅ Controle detectado: {dev['name']} ({dev['path']})")
+                self.log_signal.emit(f"{len(devices)} controle(s) encontrado(s)")
+            else:
+                messages.append("⚠️ Nenhum controle detectado — conecte o DS4 e reinicie")
+                self.log_signal.emit("Nenhum controle DS4 encontrado")
 
-        if devices:
-            for dev in devices:
-                messages.append(f"✅ Controle detectado: {dev['name']} ({dev['path']})")
-            self.log_signal.emit(f"{len(devices)} controle(s) encontrado(s)")
-        else:
-            messages.append("⚠️ Nenhum controle detectado — conecte o DS4 e reinicie")
-            self.log_signal.emit("Nenhum controle DS4 encontrado")
-
-        self.progress_signal.emit(100, "Conclusão...")
-        success = all("❌" not in m for m in messages)
-        self.finished_signal.emit(success, messages)
+            self.progress_signal.emit(100, "Conclusão...")
+            success = all("❌" not in m for m in messages)
+            self.finished_signal.emit(success, messages)
+        except Exception as exc:
+            logger.exception("System setup failed unexpectedly")
+            messages.append(f"❌ Falha inesperada na configuração: {exc}")
+            self.finished_signal.emit(False, messages)
 
 
 class SetupDialog(QDialog):
     """
-    First-launch dialog: asks for sudo password ONCE, runs system setup,
-    saves password for future use. All automatic after that.
+    Optional repair dialog for source/manual installs. Normal package
+    installation configures udev before the application is launched.
     """
 
     setup_complete = Signal(bool, list)
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Configuração do Sistema — DS4Linux")
+        self.setWindowTitle("Verificação do Sistema — DS4Linux")
         self.setModal(True)
         self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
         self.setMinimumSize(480, 340)
@@ -120,48 +114,21 @@ class SetupDialog(QDialog):
         """)
 
         # Title
-        title = QLabel("🎮 Configuração Inicial do DS4Linux")
+        title = QLabel("🎮 Verificação do Sistema — DS4Linux")
         title.setStyleSheet("font-size: 18px; font-weight: bold; color: #00d4aa;")
         title.setAlignment(Qt.AlignCenter)
         layout.addWidget(title)
 
         # Description
         desc = QLabel(
-            "O DS4Linux precisa configurar o sistema uma única vez. "
-            "Digite sua senha de administrador (sudo) e clique em 'Configurar'. "
-            "A senha será salva criptografada e usada automaticamente nas próximas vezes."
+            "Esta verificação é opcional: o DS4Linux pode abrir sem configuração administrativa. "
+            "Na instalação pelo pacote da distribuição, as regras udev já são aplicadas pelo "
+            "instalador do sistema. Use esta ação apenas se instalou o app manualmente. "
+            "Quando necessário, a autorização é solicitada pelo sistema e a senha não é guardada."
         )
         desc.setWordWrap(True)
         desc.setStyleSheet("color: #a0a0b0; font-size: 13px;")
         layout.addWidget(desc)
-
-        # Password field
-        pw_group = QGroupBox("Senha de Administrador (sudo)")
-        pw_layout = QHBoxLayout(pw_group)
-        self._pw_input = QLineEdit()
-        self._pw_input.setEchoMode(QLineEdit.Password)
-        self._pw_input.setPlaceholderText("Digite sua senha sudo...")
-        self._pw_input.setMinimumHeight(36)
-        self._pw_input.setStyleSheet("""
-            QLineEdit {
-                background: #252536;
-                border: 1px solid #3a3a5c;
-                border-radius: 6px;
-                color: #e0e0e0;
-                padding: 4px 10px;
-                font-size: 14px;
-            }
-            QLineEdit:focus { border-color: #00d4aa; }
-        """)
-        self._pw_input.returnPressed.connect(self._start_setup)
-        pw_layout.addWidget(self._pw_input)
-        layout.addWidget(pw_group)
-
-        # Remember checkbox
-        self._remember_chk = QCheckBox("Lembrar senha para uso automático")
-        self._remember_chk.setChecked(True)
-        self._remember_chk.setStyleSheet("color: #a0a0b0; font-size: 12px;")
-        layout.addWidget(self._remember_chk)
 
         # Progress
         self._progress = QProgressBar()
@@ -182,7 +149,7 @@ class SetupDialog(QDialog):
         layout.addWidget(self._progress)
 
         # Status label
-        self._status_label = QLabel("Aguardando senha...")
+        self._status_label = QLabel("Aguardando configuração...")
         self._status_label.setStyleSheet("color: #a0a0b0; font-size: 12px;")
         self._status_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(self._status_label)
@@ -209,22 +176,12 @@ class SetupDialog(QDialog):
 
     @Slot()
     def _start_setup(self):
-        password = self._pw_input.text().strip()
-        if not password:
-            QMessageBox.warning(self, "Senha necessária", "Por favor, digite a senha sudo.")
-            return
-
         self._start_btn.setEnabled(False)
-        self._pw_input.setEnabled(False)
+        self._cancel_btn.setEnabled(False)
         self._status_label.setText("Executando configuração do sistema...")
         self._log_text.setText("")
 
-        # Save password if checkbox is checked
-        from ..engine.system_checker import _store_password
-        if self._remember_chk.isChecked():
-            _store_password(password)
-
-        self._worker = _SetupWorker(password)
+        self._worker = _SetupWorker()
         self._worker.progress_signal.connect(self._on_progress)
         self._worker.log_signal.connect(self._on_log)
         self._worker.finished_signal.connect(self._on_finished)
@@ -243,7 +200,7 @@ class SetupDialog(QDialog):
     @Slot(bool, list)
     def _on_finished(self, success: bool, messages: list):
         self._start_btn.setEnabled(True)
-        self._pw_input.setEnabled(True)
+        self._cancel_btn.setEnabled(True)
 
         result_text = "\n".join(f"  {m}" for m in messages)
         self._log_text.setText(result_text)
@@ -263,10 +220,19 @@ class SetupDialog(QDialog):
             )
             self.setup_complete.emit(False, messages)
             self._start_btn.setEnabled(True)
-            self._pw_input.setEnabled(True)
+            self._cancel_btn.setEnabled(True)
 
     def _on_cancel(self):
         if self._worker and self._worker.isRunning():
-            self._worker.terminate()
+            self._cancel_btn.setEnabled(False)
+            self._status_label.setText("Aguardando a operação autorizada terminar com segurança...")
+            return
         self.setup_complete.emit(False, [])
         self.reject()
+
+    def closeEvent(self, event):
+        if self._worker and self._worker.isRunning():
+            event.ignore()
+            self._on_cancel()
+            return
+        super().closeEvent(event)

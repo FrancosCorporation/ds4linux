@@ -7,8 +7,11 @@
 - [x] **DEVOPS-01** — Corrigir dependência de runtime do Qt ausente na CI (`libegl1`) e fixar Ubuntu 24.04/Actions v7 (`.github/workflows/tests.yml:10-23`).
 - [x] **DEVOPS-02** — Ignorar caches Python/Ruff/pytest e metadados locais do projeto (`.gitignore:1-7`).
 
-## Pendências
+## Estado atualizado em 2026-10-14
 
-- [ ] **SEC-03** — Avaliar remover o armazenamento da senha sudo em texto (`src/engine/system_checker.py:17-41`); considerar integração com polkit/keyring e preservar o fluxo de configuração do usuário.
-- [ ] **TEST-01** — Reexecutar a suíte e confirmar a CI completa numa rodada autorizada; esta revisão não executou testes e o CI anterior falhou ao importar PySide6 porque faltava `libEGL.so.1`.
-- [ ] **HARDWARE-01** — Validar instalação udev, controle de LED e criação de dispositivo virtual com um DualShock 4 físico e permissões do host.
+- [x] **SEC-03** — A senha sudo não é mais solicitada nem persistida; setup usa polkit, trata timeout/erro e remove o arquivo legado sem ler seu conteúdo. Testes unitários e de GUI passaram. A autorização real do host segue sem teste físico.
+- [x] **TEST-01** — Suíte local completa: 245 testes passaram em Python 3.12.14/PySide6 6.9.3; `ruff check src tests` passou. A execução remota continua pendente em DEVOPS-04 porque a branch não foi publicada.
+
+## Pendência externa
+
+- [ ] **HARDWARE-01** — Validar instalação udev, controle de LED, criação de dispositivo virtual e jogos com um DualShock 4 físico e permissões do host. Esta etapa requer hardware e ambiente gráfico/jogos disponíveis.

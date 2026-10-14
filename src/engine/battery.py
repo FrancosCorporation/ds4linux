@@ -22,10 +22,10 @@ _SYSFS_HIDRAW = Path("/sys/class/hidraw")
 _STATUS_CAPACITY_LEVELS = 11  # DS4 status byte: capacity 0..11 (11 = full)
 
 
-def battery_percent_from_sysfs(hidraw_path: str | None) -> int:
-    """Battery 0-100 from the kernel power supply; 0 means unknown."""
+def battery_percent_from_sysfs(hidraw_path: str | None) -> int | None:
+    """Battery 0-100 from sysfs, or None when no valid reading is available."""
     if not hidraw_path:
-        return 0
+        return None
     try:
         psy_dir = (
             _SYSFS_HIDRAW / Path(hidraw_path).name / "device" / "power_supply"
@@ -33,10 +33,11 @@ def battery_percent_from_sysfs(hidraw_path: str | None) -> int:
         for entry in sorted(psy_dir.iterdir()):
             capacity = entry / "capacity"
             if capacity.is_file():
-                return max(0, min(100, int(capacity.read_text().strip())))
+                value = int(capacity.read_text().strip())
+                return value if 0 <= value <= 100 else None
     except (OSError, ValueError):
         pass
-    return 0
+    return None
 
 
 def battery_percent_from_status(status0: int) -> int:

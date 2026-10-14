@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+
+if [ "$1" = configure ] && command -v udevadm >/dev/null 2>&1; then
+    # Package-manager scripts run with system privileges and must not require
+    # an interactive terminal or a Polkit agent.
+    udevadm control --reload-rules || true
+fi
+
+exit 0

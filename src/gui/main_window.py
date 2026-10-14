@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 
 from PySide6.QtCore import QObject, QSettings, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QAction, QDesktopServices, QIcon, QPixmap
@@ -25,6 +24,7 @@ from ..constants import APP_NAME, APP_VERSION, MAX_CONTROLLERS, PROFILE_DIR
 from ..engine.auto_profile import AutoProfileManager
 from ..engine.cemuhook_server import CemuHookServer
 from ..engine.multi_device_manager import MultiDeviceManager
+from ..resource_paths import resource_path
 from .auto_profiles_tab import AutoProfilesTab
 from .controller_tab import ProfileTabWidget
 from .controllers_table import ControllersTableWidget
@@ -61,6 +61,9 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"{APP_NAME} v{APP_VERSION}")
         self.setMinimumSize(980, 660)
         self.setStyleSheet(get_stylesheet())
+        icon_path = resource_path("assets", "icon.png")
+        if icon_path.is_file():
+            self.setWindowIcon(QIcon(str(icon_path)))
         self._settings = QSettings("DS4Linux", "DS4Linux")
 
         self._multi_manager = MultiDeviceManager(max_slots=MAX_CONTROLLERS)
@@ -142,7 +145,7 @@ class MainWindow(QMainWindow):
         self.check_btn = QPushButton("Verificar de novo")
         self.check_btn.clicked.connect(self._refresh_system_status)
         buttons.addWidget(self.check_btn)
-        self.install_btn = QPushButton("Executar configuração...")
+        self.install_btn = QPushButton("Reparar instalação manual...")
         self.install_btn.clicked.connect(self._run_setup_dialog)
         buttons.addWidget(self.install_btn)
         buttons.addStretch()
@@ -177,7 +180,7 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------
     def _setup_tray(self):
-        icon_path = Path(__file__).resolve().parents[2] / "assets" / "icon.png"
+        icon_path = resource_path("assets", "icon.png")
         icon = QIcon(str(icon_path)) if icon_path.exists() else self.windowIcon()
         if icon.isNull():
             pixmap = QPixmap(64, 64)
@@ -253,6 +256,7 @@ class MainWindow(QMainWindow):
         was_connected = self._connected_count
         self._update_status()
         self._sync_dsu_providers()
+        self._auto_profile.invalidate()
         # Drop battery baselines for slots that are no longer connected so a
         # reconnect starts from the current level instead of a stale one.
         connected_ids = {s.slot_id for s in self._multi_manager.get_all_slots()
@@ -296,10 +300,9 @@ class MainWindow(QMainWindow):
             module_ok = is_module_loaded()
         except Exception:
             rules_ok = module_ok = False
-        self.udev_status.setText(
-            f"Regras udev: {'✔ instaladas' if rules_ok else '✘ ausentes'}    "
-            f"Módulo hid-playstation: {'✔ carregado' if module_ok else '⚠ não carregado'}"
-        )
+        rules_status = "✔ instaladas" if rules_ok else "⚠ ausentes ou substituídas"
+        module_status = "✔ carregado" if module_ok else "será carregado ao conectar o controle"
+        self.udev_status.setText(f"Regras udev: {rules_status}    Driver hid-playstation: {module_status}")
         self.udev_status.setStyleSheet(
             "color:#6bff6b;" if rules_ok else "color:#ffb454;"
         )
@@ -343,11 +346,21 @@ class MainWindow(QMainWindow):
 
     def _on_auto_profile_apply(self, profile_name: str):
         try:
-            applied = self._multi_manager.apply_profile_to_all(profile_name)
+            has_connected_slots = bool(self._multi_manager.get_connected_slots())
+            applied = (
+                self._multi_manager.apply_profile_to_all(profile_name)
+                if has_connected_slots
+                else profile_name.casefold()
+                in {name.casefold() for name in self._multi_manager._profile_manager.list_profiles()}
+            )
+            self._auto_profile.report_profile_application(profile_name, applied)
             if applied:
                 self._controllers_table.refresh()
                 self._osd.notify(f"Perfil: {profile_name}", level="info")
+            else:
+                logger.warning("Auto-profile '%s' was not applied to any controller", profile_name)
         except Exception:
+            self._auto_profile.report_profile_application(profile_name, False)
             logger.exception("Auto-profile apply failed for '%s'", profile_name)
 
     def _poll_battery(self):
@@ -360,7 +373,7 @@ class MainWindow(QMainWindow):
                 level = slot.battery_level
             except Exception:
                 continue
-            if level <= 0:
+            if level is None:
                 continue  # unknown
             if prev is None:
                 self._battery_slots[sid] = level

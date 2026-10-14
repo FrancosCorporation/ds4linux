@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import logging
 
 from PySide6.QtCore import QObject, Signal
@@ -30,6 +31,7 @@ class MultiDeviceManager(QObject):
         self._slots: dict[int, ControllerSlot] = {}
         self._profile_manager = ProfileManager()
         self._device_paths_in_use: set = set()
+        self._slot_paths: dict[int, str] = {}
 
         for i in range(max_slots):
             slot = ControllerSlot(i, profile_manager=self._profile_manager)
@@ -59,35 +61,34 @@ class MultiDeviceManager(QObject):
 
     def _on_scan_finished(self, paths: list):
         """Handle initial scan or periodic rescan."""
-        # Find currently connected devices by their unique ID
-        connected_uniqs = set()
-        for slot in self._slots.values():
-            if slot.is_connected and slot.device:
-                connected_uniqs.add(slot.device.uniq)
-
         for path in paths:
             if path in self._device_paths_in_use:
                 continue
-            # Check if this device was previously connected (reconnection)
+            # Reattach a returning controller to its former slot when its
+            # stable HID unique ID is available.
+            uniq = None
             try:
                 from evdev import InputDevice
                 dev = InputDevice(path)
-                if dev.uniq in connected_uniqs:
-                    # This is a reconnection - find the slot and reconnect
-                    for slot in self._slots.values():
-                        if slot.device and slot.device.uniq == dev.uniq and not slot.is_connected:
-                            logger.info(f"Reconnecting device {dev.uniq} to slot {slot.slot_id}")
-                            self._device_paths_in_use.add(path)
-                            if slot.attach_device(path):
-                                slot.start_worker()
-                                self.device_connected_signal.emit(slot.slot_id, path)
-                            else:
-                                # Don't leak the path: a failed attach must
-                                # leave the device reassignable.
-                                self._device_paths_in_use.discard(path)
-                            return
+                uniq = dev.uniq or None
+                dev.close()
             except Exception:
-                pass
+                logger.debug("Could not read unique id for %s", path, exc_info=True)
+
+            if uniq:
+                previous_slot = next((
+                    slot for slot in self._slots.values()
+                    if not slot.is_connected and slot._last_device_uniq == uniq
+                ), None)
+                if previous_slot is not None:
+                    logger.info("Reconnecting device %s to slot %s", uniq, previous_slot.slot_id)
+                    if previous_slot.attach_device(path):
+                        self._device_paths_in_use.add(path)
+                        self._slot_paths[previous_slot.slot_id] = path
+                        previous_slot.start_worker()
+                    else:
+                        self._device_paths_in_use.discard(path)
+                    continue
             # Normal new device
             if path not in self._device_paths_in_use:
                 self._try_assign_device(path)
@@ -99,9 +100,11 @@ class MultiDeviceManager(QObject):
     def _on_device_removed(self, path: str):
         for sid, slot in list(self._slots.items()):
             if slot.device_path == path:
+                if not slot.detach_device():
+                    logger.warning("Could not detach slot %s after device removal", sid)
+                    continue
                 self._device_paths_in_use.discard(path)
-                slot.stop_worker()
-                slot.detach_device()
+                self._slot_paths.pop(sid, None)
                 self.device_disconnected_signal.emit(sid)
                 logger.info(f"Removed controller at {path} from slot {sid}")
 
@@ -113,9 +116,14 @@ class MultiDeviceManager(QObject):
                 self.device_connected_signal.emit(sid, slot.device_path or "")
 
     def _on_slot_device_disconnected(self):
-        """Slot-level disconnect is fully handled by ``_on_device_removed``
-        (which knows the device path); nothing to forward here."""
-        return
+        """Drop reservations when the worker detects a device loss itself."""
+        sender = self.sender()
+        slot_id = getattr(sender, "slot_id", None)
+        if slot_id is None:
+            return
+        path = self._slot_paths.pop(slot_id, None)
+        if path:
+            self._device_paths_in_use.discard(path)
 
     def _on_slot_log(self, msg: str):
         logger.info(msg)
@@ -129,12 +137,14 @@ class MultiDeviceManager(QObject):
         profile = self._profile_manager.load_profile(
             self._profile_manager.get_current_profile_name() or "Default"
         )
-        slot.set_profile(profile)
+        if not slot.set_profile(copy.deepcopy(profile)):
+            logger.warning("Could not apply profile to slot %s", slot.slot_id)
+            return False
 
         if slot.attach_device(path):
             self._device_paths_in_use.add(path)
+            self._slot_paths[slot.slot_id] = path
             slot.start_worker()
-            self.device_connected_signal.emit(slot.slot_id, path)
             logger.info(f"Assigned {path} to slot {slot.slot_id}")
             return True
         return False
@@ -171,47 +181,69 @@ class MultiDeviceManager(QObject):
         if not slot:
             return False
 
-        if slot.is_connected:
-            if slot.device_path == device_path:
-                return True
-            slot.detach_device()
-            if slot.device_path:
-                self._device_paths_in_use.discard(slot.device_path)
+        if slot.is_connected and slot.device_path == device_path:
+            return True
 
         if device_path in self._device_paths_in_use:
             other_slot = self.get_slot_by_device_path(device_path)
-            if other_slot and other_slot != slot:
-                other_slot.detach_device()
+            if other_slot is not None and other_slot != slot:
+                logger.warning("Device %s is already assigned to slot %s",
+                               device_path, other_slot.slot_id)
+                return False
+            if other_slot is None:
+                logger.warning("Dropping stale reservation for %s", device_path)
+                self._device_paths_in_use.discard(device_path)
+
+        if slot.is_connected:
+            if slot.device_path == device_path:
+                return True
+            old_path = slot.device_path
+            if not slot.detach_device():
+                return False
+            if old_path:
+                self._device_paths_in_use.discard(old_path)
+            self._slot_paths.pop(slot_id, None)
 
         profile = self._profile_manager.load_profile(
             self._profile_manager.get_current_profile_name() or "Default"
         )
-        slot.set_profile(profile)
+        if not slot.set_profile(copy.deepcopy(profile)):
+            return False
 
         if slot.attach_device(device_path):
             self._device_paths_in_use.add(device_path)
+            self._slot_paths[slot_id] = device_path
             slot.start_worker()
-            self.device_connected_signal.emit(slot.slot_id, device_path)
             return True
         return False
 
     def disconnect_slot(self, slot_id: int):
         slot = self.get_slot(slot_id)
         if slot and slot.is_connected:
-            slot.stop_worker()
-            if slot.device_path:
-                self._device_paths_in_use.discard(slot.device_path)
-            slot.detach_device()
+            if not slot.stop_worker():
+                return False
+            old_path = slot.device_path
+            if not slot.detach_device():
+                return False
+            if old_path:
+                self._device_paths_in_use.discard(old_path)
+            self._slot_paths.pop(slot_id, None)
             self.device_disconnected_signal.emit(slot_id)
+            return True
+        return False
 
     def disconnect_all(self):
         for slot in list(self._slots.values()):
             if slot.is_connected:
-                slot.stop_worker()
-                if slot.device_path:
-                    self._device_paths_in_use.discard(slot.device_path)
-                slot.detach_device()
-                self.device_disconnected_signal.emit(slot.slot_id)
+                if not slot.stop_worker():
+                    logger.error("Could not stop slot %s during disconnect_all", slot.slot_id)
+                    continue
+                old_path = slot.device_path
+                if slot.detach_device():
+                    if old_path:
+                        self._device_paths_in_use.discard(old_path)
+                    self._slot_paths.pop(slot.slot_id, None)
+                    self.device_disconnected_signal.emit(slot.slot_id)
 
     def apply_profile_to_all(self, profile_name: str) -> bool:
         """Apply a named profile to every connected slot (auto-profile support).
@@ -221,7 +253,11 @@ class MultiDeviceManager(QObject):
         """
         if not profile_name:
             return False
-        profile = self._profile_manager.load_profile(profile_name)
+        known_profiles = {name.casefold() for name in self._profile_manager.list_profiles()}
+        if profile_name.casefold() not in known_profiles:
+            logger.warning("apply_profile_to_all: profile '%s' does not exist", profile_name)
+            return False
+        profile = self._profile_manager.load_profile(profile_name, remember=False)
         if not profile:
             logger.warning(f"apply_profile_to_all: profile '{profile_name}' not found")
             return False
@@ -229,9 +265,12 @@ class MultiDeviceManager(QObject):
         applied = False
         for slot in self._slots.values():
             if slot.is_connected:
-                slot.set_profile(profile)
-                applied = True
-                logger.info(f"Slot {slot.slot_id} -> profile '{profile_name}'")
+                if slot.set_profile(copy.deepcopy(profile)):
+                    applied = True
+                    logger.info(f"Slot {slot.slot_id} -> profile '{profile_name}'")
+                else:
+                    logger.warning("Slot %s rejected profile '%s' safely",
+                                   slot.slot_id, profile_name)
         return applied
 
     def cleanup(self):

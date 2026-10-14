@@ -20,16 +20,8 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 UDEVS_RULE_HINT = (
-    "Permissao negada ao acessar LED/HID. Execute:\n"
-    "  sudo cp <projeto>/udev/99-ds4linux.rules /etc/udev/rules.d/\n"
-    "  sudo udevadm control --reload-rules && sudo udevadm trigger\n"
-    "Ou adicione manualmente ao /etc/udev/rules.d/99-ds4linux.rules:\n"
-    '  SUBSYSTEM=="leds", KERNEL=="input*:red", MODE="0666", TAG+="uaccess"\n'
-    '  SUBSYSTEM=="leds", KERNEL=="input*:green", MODE="0666", TAG+="uaccess"\n'
-    '  SUBSYSTEM=="leds", KERNEL=="input*:blue", MODE="0666", TAG+="uaccess"\n'
-    '  SUBSYSTEM=="leds", KERNEL=="input*:global", MODE="0666", TAG+="uaccess"\n'
-    '  SUBSYSTEM=="leds", KERNEL=="input*:rgb:*", MODE="0666", TAG+="uaccess"\n'
-    '  SUBSYSTEM=="hidraw", ATTRS{idVendor}=="054c", MODE="0666", TAG+="uaccess"\n'
+    "Permissão negada ao acessar LED/HID. Instale as regras udev mantidas pelo projeto "
+    "por meio de install.sh ou do assistente do sistema; não amplie permissões dos nós manualmente."
 )
 
 
@@ -55,19 +47,20 @@ class LEDController:
         self._blue_path: Path | None = None
         self._brightness_path: Path | None = None
         # New driver (hid-playstation) paths
-        self._colors_path: Path | None = None       # inputNN:rgb:indicator/colors
+        self._colors_path: Path | None = None  # inputNN:rgb:indicator/colors
         self._multi_intensity_path: Path | None = None
         self._global_path: Path | None = None
 
         self._max_brightness = 255
+        self._brightness = 255  # normalized GUI/API range, independent of sysfs max
         self._current_color: tuple[int, int, int] = (0, 0, 255)
         self._enabled = True
         self._driver: str | None = None  # 'sony' | 'playstation' | None
         # Rumble state (0-255 per motor) mirrored into every output report so
         # color updates never cancel an active vibration (mirrors the kernel's
         # "always send rumble + lightbar together" compatibility rule).
-        self._rumble_left = 0    # strong motor (0-65535 -> 0-255)
-        self._rumble_right = 0   # weak motor
+        self._rumble_left = 0  # strong motor (0-65535 -> 0-255)
+        self._rumble_right = 0  # weak motor
         # Transport ('usb' | 'bt') of the configured hidraw node; cached.
         self._transport: str | None = None
         # Cached hidraw fd (rumble writes arrive at a high rate).
@@ -103,6 +96,7 @@ class LEDController:
     def _find_input_device_name(device_path: str) -> str | None:
         """Extract the input device name (e.g. 'input171') from an event path."""
         from pathlib import Path as P
+
         try:
             event_name = P(device_path).name  # e.g. "event19"
             input_sysfs = P(f"/sys/class/input/{event_name}")
@@ -219,43 +213,42 @@ class LEDController:
         # or a concurrent setter sees a half-updated report (stale motor or
         # stale color). _hid_lock is an RLock, so _send_hid_report re-enters.
         with self._hid_lock:
+            r, g, b = (max(0, min(255, int(channel))) for channel in (r, g, b))
             self._current_color = (r, g, b)
+            output_color = self._scaled_color_locked()
 
             # --- Priority 1: HID output report (transport-aware) ---
-            if self._send_hid_report(self._make_color_report(r, g, b)):
+            if self._send_hid_report(self._make_color_report(*output_color)):
                 return
 
         # --- Priority 2: hid-playstation `colors` file (hex RRGGBB) ---
         if self._colors_path:
-            hex_color = f"{r:02X}{g:02X}{b:02X}"
+            hex_color = "".join(f"{channel:02X}" for channel in output_color)
             if self._write_sysfs(self._colors_path, hex_color):
-                logger.info(f"LED color ({r},{g},{b}) via sysfs colors ({hex_color})")
+                logger.info("LED color %s via sysfs colors (%s)", output_color, hex_color)
                 return
 
         # --- Priority 3: hid-sony individual brightness files ---
         if self._red_path or self._green_path or self._blue_path:
             written_any = False
             for path, val in [
-                (self._red_path, r),
-                (self._green_path, g),
-                (self._blue_path, b),
+                (self._red_path, output_color[0]),
+                (self._green_path, output_color[1]),
+                (self._blue_path, output_color[2]),
             ]:
-                if path and self._write_sysfs(path, str(val)):
+                if path and self._write_sysfs_channel(path, val):
                     written_any = True
             if written_any:
-                logger.info(f"LED color ({r},{g},{b}) via sysfs brightness channels")
+                logger.info("LED color %s via sysfs brightness channels", output_color)
                 return
 
         # --- Priority 4: global brightness (on/off only) ---
         if self._global_path:
-            luminance = (r + g + b) // 3
+            luminance = sum(output_color) // 3
             self._write_sysfs(self._global_path, "1" if luminance > 85 else "0")
 
         # No successful write — log helpful hint
-        logger.warning(
-            f"LED color ({r},{g},{b}) — all write methods failed. "
-            f"{UDEVS_RULE_HINT.strip()}"
-        )
+        logger.warning(f"LED color ({r},{g},{b}) — all write methods failed. {UDEVS_RULE_HINT.strip()}")
 
     def _send_hid_report(self, report: bytes, quiet: bool = False) -> bool:
         """Send an output report to the DS4 over hidraw. Returns True on success.
@@ -321,9 +314,7 @@ class LEDController:
                     # O_NONBLOCK: a BT hidraw write can stall briefly while
                     # the radio is busy; without it the _hid_lock (shared by
                     # GUI/worker/DSU) would be held for the whole stall.
-                    self._hid_fd = os.open(
-                        str(self._hid_device_path), os.O_RDWR | os.O_NONBLOCK
-                    )
+                    self._hid_fd = os.open(str(self._hid_device_path), os.O_RDWR | os.O_NONBLOCK)
                 else:
                     self._hid_fd = device_manager.DeviceManager.get_hid_device() or -1
             except OSError as ex:
@@ -352,10 +343,7 @@ class LEDController:
                 f.write(value)
             return True
         except PermissionError:
-            logger.error(
-                f"Permission denied writing {path}. "
-                f"{UDEVS_RULE_HINT.strip()}"
-            )
+            logger.error(f"Permission denied writing {path}. {UDEVS_RULE_HINT.strip()}")
             return False
         except OSError as e:
             logger.warning(f"Failed to write {path}: {e}")
@@ -386,19 +374,19 @@ class LEDController:
           bytes 0x4A–0x4D: CRC32 (seed 0xA2, over bytes 0x00–0x49)
         """
         rep = bytearray(78)
-        rep[0]  = 0x11
-        rep[1]  = 0x80 | 0x40 | 0x04   # hw_control
-        rep[2]  = 0x00                  # audio_control
-        rep[3]  = 0x01 | 0x02           # valid_flag0: LED + motor
-        rep[4]  = 0x00                  # valid_flag1
-        rep[5]  = 0x00                  # reserved
-        rep[6]  = self._rumble_right    # motor_right (weak)
-        rep[7]  = self._rumble_left     # motor_left (strong)
-        rep[8] = r                     # lightbar_red
-        rep[9] = g                     # lightbar_green
-        rep[10] = b                    # lightbar_blue
-        rep[11] = 0x00                  # blink_on
-        rep[12] = 0x00                  # blink_off
+        rep[0] = 0x11
+        rep[1] = 0x80 | 0x40 | 0x04  # hw_control
+        rep[2] = 0x00  # audio_control
+        rep[3] = 0x01 | 0x02  # valid_flag0: LED + motor
+        rep[4] = 0x00  # valid_flag1
+        rep[5] = 0x00  # reserved
+        rep[6] = self._rumble_right  # motor_right (weak)
+        rep[7] = self._rumble_left  # motor_left (strong)
+        rep[8] = r  # lightbar_red
+        rep[9] = g  # lightbar_green
+        rep[10] = b  # lightbar_blue
+        rep[11] = 0x00  # blink_on
+        rep[12] = 0x00  # blink_off
         # bytes 13..73 remain zero
 
         # CRC32: seed 0xA2, computed over bytes 0x00..0x49
@@ -440,11 +428,11 @@ class LEDController:
         """
         rep = bytearray(32)
         rep[0] = 0x05
-        rep[1] = 0x01                # valid_flag0: motor
+        rep[1] = 0x01  # valid_flag0: motor
         rep[4] = self._rumble_right
         rep[5] = self._rumble_left
         if led:
-            rep[1] |= 0x02           # valid_flag0: LED
+            rep[1] |= 0x02  # valid_flag0: LED
             rep[6] = int(r) & 0xFF
             rep[7] = int(g) & 0xFF
             rep[8] = int(b) & 0xFF
@@ -456,7 +444,7 @@ class LEDController:
         if self.detect_transport() == "usb":
             return self._make_usb_output_report()
         rep = bytearray(self._make_hid_output_report(*self._current_color))
-        rep[3] = 0x01                # valid_flag0: motor only
+        rep[3] = 0x01  # valid_flag0: motor only
         rep[8] = rep[9] = rep[10] = 0
         # Recompute CRC over the modified payload
         crc = zlib.crc32(bytes([0xA2]), 0xFFFFFFFF)
@@ -478,9 +466,7 @@ class LEDController:
         if not self._hid_device_path:
             return None
         try:
-            uevent = (
-                Path(f"/sys/class/hidraw/{self._hid_device_path.name}/device/uevent")
-            )
+            uevent = Path(f"/sys/class/hidraw/{self._hid_device_path.name}/device/uevent")
             for line in uevent.read_text().splitlines():
                 if line.startswith("HID_ID="):
                     bus = line.split("=", 1)[1].split(":", 1)[0]
@@ -527,30 +513,52 @@ class LEDController:
         """
         if not self._enabled:
             return
-        value = max(0, min(brightness, self._max_brightness))
+        value = max(0, min(int(brightness), 255))
 
-        # Update virtual display (global/brightness)
+        with self._hid_lock:
+            self._brightness = value
+            color = self._scaled_color_locked()
+            # Brightness is part of the same HID report as color and rumble;
+            # send it immediately so USB/BT hardware reflects slider changes.
+            self._send_hid_report(self._make_color_report(*color))
+
+        # Update the sysfs brightness control, mapping normalized UI values
+        # to that node's own range (global LEDs often expose only 0..1).
         target = self._brightness_path or self._global_path
         if target:
-            self._write_sysfs(target, str(value))
+            maximum = self._read_sysfs_max(target, 255)
+            self._write_sysfs(target, str(round(value * maximum / 255)))
 
         # Scale individual color channels proportionally. The color read is
         # inside _hid_lock like every other consumer of _current_color
         # (set_color publishes it under the same lock). Each sysfs path is
         # checked individually: partial drivers (red only, etc.) must not
         # crash on open(None).
-        with self._hid_lock:
-            color = self._current_color
-        if color != (0, 0, 0) and (
-            self._red_path or self._green_path or self._blue_path
-        ):
-            scale = value / self._max_brightness if self._max_brightness else 1.0
-            r, g, b = color
-            for path, channel in (
-                (self._red_path, r), (self._green_path, g), (self._blue_path, b),
+        if any((self._red_path, self._green_path, self._blue_path)):
+            for path, channel in zip(
+                (self._red_path, self._green_path, self._blue_path),
+                color,
+                strict=True,
             ):
                 if path:
-                    self._write_sysfs(path, str(int(channel * scale)))
+                    self._write_sysfs_channel(path, channel)
+
+    def _scaled_color_locked(self) -> tuple[int, int, int]:
+        scale = self._brightness / 255
+        return tuple(round(channel * scale) for channel in self._current_color)
+
+    @staticmethod
+    def _read_sysfs_max(path: Path, fallback: int) -> int:
+        try:
+            value = int((path.parent / "max_brightness").read_text().strip())
+            return value if value > 0 else fallback
+        except (OSError, ValueError):
+            return fallback
+
+    def _write_sysfs_channel(self, path: Path, normalized: int) -> bool:
+        maximum = self._read_sysfs_max(path, self._max_brightness)
+        value = round(max(0, min(255, normalized)) * maximum / 255)
+        return self._write_sysfs(path, str(value))
 
     # ------------------------------------------------------------------
     # Query helpers
@@ -573,8 +581,7 @@ class LEDController:
     def is_available(self) -> bool:
         """Check if at least one LED path is available."""
         return bool(
-            self._red_path or self._green_path or self._blue_path
-            or self._colors_path or self._global_path
+            self._red_path or self._green_path or self._blue_path or self._colors_path or self._global_path
         )
 
     def get_driver(self) -> str | None:
@@ -585,16 +592,21 @@ class LEDController:
     # Static: find DS4 LED sysfs base path
     # ------------------------------------------------------------------
     @staticmethod
-    def find_ds4_led(device_path: str) -> Path | None:
+    def find_ds4_led(
+        device_path: str,
+        *,
+        sys_class_input: Path = Path("/sys/class/input"),
+        sys_leds_base: Path | None = None,
+    ) -> Path | None:
         """
         Find the LED sysfs base directory for a DS4 controller.
         """
-        from pathlib import Path as P
-
         from ..constants import SYS_LEDS_BASE
 
+        if sys_leds_base is None:
+            sys_leds_base = SYS_LEDS_BASE
         try:
-            input_sysfs = P(f"/sys/class/input/{P(device_path).name}")
+            input_sysfs = sys_class_input / Path(device_path).name
             if not input_sysfs.exists():
                 return None
 
@@ -604,53 +616,34 @@ class LEDController:
             except (OSError, RuntimeError):
                 return None
 
-            # Path looks like: .../0005:054C:05C4.001D/input/input218/event19
-            # LED symlinks point to: .../0005:054C:05C4.001D
-            # We need to go up 3 levels from resolved_input
-            hid_device = resolved_input.parent.parent.parent  # Skip /event19, /input218, /input
+            # Event sysfs resolves beneath <hid-device>/input/inputN/eventN.
+            if len(resolved_input.parents) < 3:
+                return None
+            hid_device = resolved_input.parents[2]
 
-            # Search for LED directories pointing to this HID device
-            for entry in SYS_LEDS_BASE.iterdir():
+            # Match each LED's sysfs parent directly to this event device.
+            # A global "first Sony LED" fallback cross-wires colors when two
+            # controllers are connected, so ambiguous/unmatched cases stay off.
+            matches = set()
+            for entry in sorted(sys_leds_base.iterdir()):
                 if not entry.is_dir():
                     continue
-
-                name = entry.name
-                if ":" not in name:
+                if ":" not in entry.name:
                     continue
-
-                # Extract base name (e.g., "input185" from "input185:red")
-                base = name.split(":")[0]
-
-                # Check if red/green/blue exist
-                red_dir = SYS_LEDS_BASE / f"{base}:red"
-                green_dir = SYS_LEDS_BASE / f"{base}:green"
-                blue_dir = SYS_LEDS_BASE / f"{base}:blue"
-
-                if not (red_dir.exists() and green_dir.exists() and blue_dir.exists()):
-                    continue
-
-                # Check device symlink
-                dev_link = red_dir / "device"
+                base = entry.name.split(":", 1)[0]
+                dev_link = entry / "device"
                 if not dev_link.exists():
                     continue
-
                 try:
                     led_device = dev_link.resolve()
                     if str(led_device) == str(hid_device):
-                        return SYS_LEDS_BASE / base
+                        matches.add(base)
                 except (OSError, RuntimeError):
                     continue
-
-            # Fallback: return first LED tree
-            for entry in SYS_LEDS_BASE.iterdir():
-                if not entry.is_dir():
-                    continue
-                name = entry.name
-                if ":red" in name:
-                    base = name.replace(":red", "")
-                    if (SYS_LEDS_BASE / f"{base}:green").exists() and \
-                       (SYS_LEDS_BASE / f"{base}:blue").exists():
-                        return SYS_LEDS_BASE / base
+            if len(matches) == 1:
+                return sys_leds_base / matches.pop()
+            if len(matches) > 1:
+                logger.warning("Multiple LED groups resolve to %s; refusing ambiguous match", device_path)
 
         except Exception as e:
             logger.debug(f"Error finding DS4 LED for {device_path}: {e}")

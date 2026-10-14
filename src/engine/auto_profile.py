@@ -49,7 +49,7 @@ class AutoProfileRule:
 class AutoProfileManager(QObject):
     """DS4Windows-style auto profile switcher for Linux/X11.
 
-    Polls the foreground window (via `xprop`/`/proc`) and applies the profile
+    Polls the foreground X11 window (via `xprop`) and applies the profile
     bound to the active game/app. When no rule matches, reverts to the default
     profile (DS4Windows "AutoProfileRevertDefaultProfile" behavior).
     """
@@ -69,7 +69,8 @@ class AutoProfileManager(QObject):
         self._enabled: bool = True
         self._current_profile: str | None = None
         self._last_key: tuple | None = None
-        # Foreground detection runs on a worker thread (xprop/pgrep can take
+        self._pending_profile: str | None = None
+        # Foreground detection runs on a worker thread (xprop can take
         # seconds); the busy flag prevents overlapping runs.
         self._detect_busy = False
 
@@ -78,6 +79,9 @@ class AutoProfileManager(QObject):
         self._timer.setInterval(DEFAULT_POLL_INTERVAL_MS)
 
         self._load()
+        self.rules_changed.connect(self.invalidate)
+        if self._profile_manager is not None and hasattr(self._profile_manager, "profiles_changed"):
+            self._profile_manager.profiles_changed.connect(self.invalidate)
 
     # ------------------------------------------------------------------
     # Persistence
@@ -153,6 +157,7 @@ class AutoProfileManager(QObject):
             self._timer.stop()
             self._current_profile = None
             self._last_key = None
+            self._pending_profile = None
 
     def is_enabled(self) -> bool:
         return self._enabled
@@ -160,6 +165,27 @@ class AutoProfileManager(QObject):
     def set_default_profile(self, name: str):
         self._default_profile = name
         self.save()
+
+    def invalidate(self):
+        """Re-evaluate the current foreground after rules/profiles/devices change."""
+        self._last_key = None
+        self._current_profile = None
+        self._pending_profile = None
+        if self._enabled:
+            self.check_now()
+
+    def report_profile_application(self, profile_name: str, succeeded: bool):
+        """Commit auto-profile state only after the slot manager reports success."""
+        if self._pending_profile != profile_name:
+            return
+        self._pending_profile = None
+        if succeeded:
+            self._current_profile = profile_name
+            self.active_profile_changed.emit(profile_name)
+        else:
+            self._current_profile = None
+            self._last_key = None
+            self.log_message.emit(f"[Auto Profile] Falha ao aplicar o perfil \"{profile_name}\"; nova tentativa será feita.")
 
     def get_default_profile(self) -> str:
         return self._default_profile
@@ -176,12 +202,9 @@ class AutoProfileManager(QObject):
     # ------------------------------------------------------------------
     def get_foreground_info(self) -> tuple[str, str] | None:
         """Return (process_name, window_title) of the active window or None."""
-        if os.environ.get("DISPLAY"):
-            info = self._get_foreground_x11()
-            if info:
-                return info
-        # Wayland / unknown: fall back to process scan for known game binaries
-        return self._get_foreground_by_process()
+        if not os.environ.get("DISPLAY"):
+            return None
+        return self._get_foreground_x11()
 
     def _get_foreground_x11(self) -> tuple[str, str] | None:
         try:
@@ -248,33 +271,13 @@ class AutoProfileManager(QObject):
             pass
         return ""
 
-    def _get_foreground_by_process(self) -> tuple[str, str] | None:
-        """Fallback for Wayland: scan running processes for known game apps."""
-        known = ("wine", "proton", "heroic", "lutris", "steam", "godot",
-                 "unity", "game", "eluauncher", "hydra", "playnite")
-        try:
-            out = subprocess.run(
-                ["pgrep", "-f", "-l", ".*"],
-                capture_output=True, text=True, timeout=1,
-            ).stdout
-        except Exception:
-            return None
-        for line in out.splitlines():
-            parts = line.split(" ", 1)
-            if len(parts) < 2:
-                continue
-            name = parts[1].lower()
-            if any(k in name for k in known):
-                return name, name
-        return None
-
     # ------------------------------------------------------------------
     # Matching / profile switching
     # ------------------------------------------------------------------
     def check_now(self):
         """Kick off one asynchronous foreground detection.
 
-        Detection shells out to xprop/pgrep, so it never runs on the GUI
+        Detection shells out to xprop, so it never runs on the GUI
         thread: a slow or hung X server would otherwise freeze the window.
         Signals are emitted from the worker thread and delivered to GUI
         receivers through Qt's queued connections.
@@ -313,7 +316,12 @@ class AutoProfileManager(QObject):
         if not self._enabled:
             return
         if not info:
-            self.detection_state_changed.emit("Nenhuma janela ativa detectada")
+            state = (
+                "Sessão sem X11: foco não confirmado; seleção manual necessária"
+                if not os.environ.get("DISPLAY")
+                else "Nenhuma janela ativa detectada"
+            )
+            self.detection_state_changed.emit(state)
             return
         process_name, window_title = info
         self.detection_state_changed.emit(f"{process_name} — {window_title}")
@@ -328,11 +336,14 @@ class AutoProfileManager(QObject):
             profile_name = self._default_profile
 
         if profile_name and profile_name != self._current_profile:
-            self._current_profile = profile_name
-            self.log_message.emit(
-                f"[Auto Profile] Ativo: \"{profile_name}\" (jogo: {window_title or process_name})"
-            )
-            self.active_profile_changed.emit(profile_name)
+            if self._profile_manager is not None:
+                known_profiles = {name.casefold() for name in self._profile_manager.list_profiles()}
+                if profile_name.casefold() not in known_profiles:
+                    self.log_message.emit(
+                        f"[Auto Profile] Perfil \"{profile_name}\" não existe; regra ignorada."
+                    )
+                    return
+            self._pending_profile = profile_name
             self.profile_apply_requested.emit(profile_name)
 
     def _match_rule(self, process_name: str, window_title: str) -> str | None:
@@ -355,3 +366,4 @@ class AutoProfileManager(QObject):
         """
         self._enabled = False
         self._timer.stop()
+        self._pending_profile = None

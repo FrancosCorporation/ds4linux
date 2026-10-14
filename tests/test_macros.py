@@ -14,6 +14,7 @@ from evdev import ecodes as e
 
 from src.engine.input_mapper import InputMapper, MacroAction, ProfileConfig
 from src.engine.macro_engine import EV_KEY, MacroEngine
+from src.engine.virtual_device import VirtualDevice
 from src.engine.worker_thread import WorkerThread
 from tests.helpers import make_usb_report
 
@@ -91,7 +92,7 @@ class TestMacroEngine(unittest.TestCase):
         self.assertEqual(eng.dropped, 2)
         self.assertEqual(len(eng._pending), MacroEngine.MAX_PENDING)
         delays = [a[0].delay for a in eng._pending]
-        self.assertEqual(delays[0], 2.0)   # two oldest gone
+        self.assertEqual(delays[0], 2.0)  # two oldest gone
         self.assertEqual(delays[-1], float(MacroEngine.MAX_PENDING + 1))  # newest kept
 
     def test_delay_clamped(self):
@@ -107,6 +108,100 @@ class TestMacroEngine(unittest.TestCase):
     def test_shutdown_stops_queueing(self):
         self.eng.shutdown()
         self.assertFalse(self.eng.execute_macro([MacroAction("key", 0x130, 1)]))
+
+    def test_pause_and_cancel_interrupts_wait_and_releases_held_keys(self):
+        actions = [
+            MacroAction("key", 0x130, 1),
+            MacroAction("wait", 0, 0, 10.0),
+            MacroAction("key", 0x130, 0),
+        ]
+        self.assertTrue(self.eng.execute_macro(actions))
+        self._wait_events(1)
+        self.assertTrue(self.eng.execute_macro([MacroAction("key", 0x131, 1)]))
+
+        started = time.monotonic()
+        self.assertTrue(self.eng.pause_and_cancel(timeout=1.0))
+        self.assertLess(time.monotonic() - started, 1.0)
+        self.assertEqual(
+            self.vdev.events,
+            [
+                (EV_KEY, 0x130, 1),
+                (EV_KEY, 0x130, 0),
+            ],
+        )
+        self.assertEqual(self.eng.pending_count(), 0)
+        self.assertFalse(self.eng.execute_macro([MacroAction("key", 0x132, 1)]))
+
+        self.eng.resume()
+        self.assertTrue(
+            self.eng.execute_macro(
+                [
+                    MacroAction("key", 0x131, 1),
+                    MacroAction("key", 0x131, 0),
+                ]
+            )
+        )
+        self._wait_events(4)
+        self.assertEqual(
+            self.vdev.events[2:],
+            [
+                (EV_KEY, 0x131, 1),
+                (EV_KEY, 0x131, 0),
+            ],
+        )
+
+    def test_virtual_device_observes_macro_writes_for_diagnostics(self):
+        class RecordingUInput:
+            def __init__(self):
+                self.events = []
+
+            def write(self, event_type, code, value):
+                self.events.append((event_type, code, value))
+
+            def syn(self):
+                pass
+
+        vdev = VirtualDevice()
+        uinput = RecordingUInput()
+        vdev._uinput = uinput
+        observed = []
+        vdev.set_event_observer(lambda *event: observed.append(event))
+        engine = MacroEngine(vdev)
+        self.addCleanup(engine.shutdown)
+
+        self.assertTrue(
+            engine.execute_macro(
+                [
+                    MacroAction("key", 0x130, 1),
+                    MacroAction("key", 0x130, 0),
+                ]
+            )
+        )
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and len(observed) < 2:
+            time.sleep(0.01)
+
+        self.assertEqual(observed, [(EV_KEY, 0x130, 1), (EV_KEY, 0x130, 0)])
+        self.assertEqual(uinput.events, observed)
+
+    def test_worker_routes_virtual_device_observations_to_diagnostic_signal(self):
+        class RecordingUInput:
+            def __init__(self):
+                self.events = []
+
+            def write(self, event_type, code, value):
+                self.events.append((event_type, code, value))
+
+        worker = WorkerThread()
+        vdev = VirtualDevice()
+        vdev._uinput = RecordingUInput()
+        observed = []
+        worker.mapped_event.connect(lambda *event: observed.append(event))
+
+        worker.set_virtual_device(vdev)
+        vdev.write_event(EV_KEY, 0x130, 1)
+
+        self.assertEqual(observed, [(EV_KEY, 0x130, 1)])
 
 
 # ---------------------------------------------------------------------------
@@ -140,14 +235,10 @@ class TestMacroButtonWiring(unittest.TestCase):
         self.assertEqual(len(self.engine.calls), 2)
 
     def test_mapped_button_still_forwarded(self):
-        self.assertEqual(
-            self.mapper.map_button(e.BTN_SOUTH, 1), (0x130, 1)
-        )
+        self.assertEqual(self.mapper.map_button(e.BTN_SOUTH, 1), (0x130, 1))
         # Deduped on repeat
         self.assertIsNone(self.mapper.map_button(e.BTN_SOUTH, 1))
-        self.assertEqual(
-            self.mapper.map_button(e.BTN_SOUTH, 0), (0x130, 0)
-        )
+        self.assertEqual(self.mapper.map_button(e.BTN_SOUTH, 0), (0x130, 0))
         self.assertEqual(self.engine.calls, [])
 
     def test_maybe_execute_macro_dpad_semantics(self):
@@ -168,16 +259,21 @@ class TestHidrawMacroPath(unittest.TestCase):
         self.vdev = FakeVDev()
         self.engine = RecordingMacroEngine()
         self.profile = ProfileConfig(name="macro-hidraw")
-        self.profile.button_maps[e.BTN_EAST] = 0x131      # plain mapping
+        self.profile.button_maps[e.BTN_EAST] = 0x131  # plain mapping
         self.profile.macros[e.BTN_SOUTH] = [MacroAction("key", 0x130, 1)]
         self.mapper = InputMapper(self.profile, macro_engine=self.engine)
         self.worker = WorkerThread()
 
     def _process(self, report):
         self.worker._process_hidraw_report(
-            report, self.vdev.write_event, self.vdev.sync,
-            self.mapper.button_state, self.mapper.axis_state,
-            self.mapper, e.EV_KEY, e.EV_ABS,
+            report,
+            self.vdev.write_event,
+            self.vdev.sync,
+            self.mapper.button_state,
+            self.mapper.axis_state,
+            self.mapper,
+            e.EV_KEY,
+            e.EV_ABS,
         )
 
     def test_macro_fires_once_across_repeated_reports(self):
@@ -200,7 +296,7 @@ class TestHidrawMacroPath(unittest.TestCase):
 
     def test_release_of_plain_button_forwarded(self):
         self._process(make_usb_report(b0_extra=0x40))  # press
-        self._process(make_usb_report())               # release
+        self._process(make_usb_report())  # release
         key_writes = [ev for ev in self.vdev.events if ev[0] == e.EV_KEY]
         self.assertEqual(key_writes, [(e.EV_KEY, 0x131, 1), (e.EV_KEY, 0x131, 0)])
 

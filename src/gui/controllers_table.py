@@ -189,7 +189,8 @@ class ControllersTableWidget(QWidget):
                         ex_item.setToolTip("Device Grabber Active")
                     bat_item = self.table.item(r, 4)
                     if bat_item:
-                        bat_item.setText(f"{slot.battery_level}%" if slot.battery_level > 0 else "--")
+                        level = slot.battery_level
+                        bat_item.setText(f"{level}%" if level is not None else "--")
                     self._set_led_color_cell(r, slot)
                 else:
                     # Device disconnected
@@ -240,15 +241,23 @@ class ControllersTableWidget(QWidget):
         # Column 3: Ex (grabber key icon)
         ex_item = QTableWidgetItem()
         if slot.is_connected:
-            ex_item.setText("🔑")
-            ex_item.setToolTip("Device Grabber Active")
+            if slot.input_grabbed:
+                ex_item.setText("🔑")
+                ex_item.setToolTip("Entrada física capturada exclusivamente")
+            else:
+                ex_item.setText("⚠")
+                ex_item.setToolTip(
+                    "Entrada física não capturada; pode haver entrada duplicada no jogo. "
+                    "Feche Steam Input/outro serviço e reconecte."
+                )
             ex_item.setTextAlignment(Qt.AlignCenter)
         self.table.setItem(row, 3, ex_item)
 
         # Column 4: Battery
         bat_item = QTableWidgetItem()
         if slot.is_connected:
-            bat_item.setText(f"{slot.battery_level}%" if slot.battery_level > 0 else "--")
+            level = slot.battery_level
+            bat_item.setText(f"{level}%" if level is not None else "--")
         else:
             bat_item.setText("--")
         self.table.setItem(row, 4, bat_item)

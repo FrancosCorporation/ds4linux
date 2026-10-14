@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import copy
 import logging
+from datetime import datetime
+from pathlib import Path
 
-from PySide6.QtCore import QSettings, Qt, Signal
+from PySide6.QtCore import QSettings, Qt, QTimer, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -23,6 +26,7 @@ from PySide6.QtWidgets import (
     QSlider,
     QSpinBox,
     QTabWidget,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -32,7 +36,7 @@ from ..constants import DS4Btn
 from ..engine.input_mapper import AxisConfig, ProfileConfig, TriggerConfig
 from ..engine.virtual_device import VirtualDeviceType as VDT
 from .color_dialog import ColorDialog
-from .mapping_tab import MappingTabWidget
+from .mapping_tab import MappingTabWidget, physical_name, target_name
 from .styles import get_stylesheet
 
 logger = logging.getLogger(__name__)
@@ -85,6 +89,7 @@ class ProfileEditorWindow(QWidget):
         # is shared until first write — code smell).
         self._hat_x = 0
         self._hat_y = 0
+        self._trace_mapping_text = "Mapeamento: aguardando entrada"
         self.setStyleSheet(get_stylesheet())
 
         self._setup_ui()
@@ -100,66 +105,81 @@ class ProfileEditorWindow(QWidget):
         root.setSpacing(10)
 
         # ---------------- header ----------------
-        header = QHBoxLayout()
+        header = QVBoxLayout()
         header.setSpacing(8)
 
-        header.addWidget(QLabel("Perfil:"))
+        profile_row = QHBoxLayout()
+        profile_row.addWidget(QLabel("Perfil:"))
         self.profile_name_edit = QLineEdit()
         self.profile_name_edit.setPlaceholderText("Nome do perfil...")
         self.profile_name_edit.setMinimumWidth(180)
-        header.addWidget(self.profile_name_edit)
+        self.profile_name_edit.setAccessibleName("Nome do perfil")
+        profile_row.addWidget(self.profile_name_edit)
 
         self.save_btn = QPushButton("Salvar")
         self.save_btn.setObjectName("primaryButton")
         self.save_btn.clicked.connect(self._save_profile)
-        header.addWidget(self.save_btn)
+        profile_row.addWidget(self.save_btn)
 
         self.cancel_btn = QPushButton("Cancelar")
         self.cancel_btn.clicked.connect(self._cancel_profile)
-        header.addWidget(self.cancel_btn)
+        profile_row.addWidget(self.cancel_btn)
 
-        header.addSpacing(12)
-        header.addWidget(QLabel("Emular:"))
+        profile_row.addSpacing(12)
+        profile_row.addWidget(QLabel("Emular:"))
         self.device_type_combo = QComboBox()
         self.device_type_combo.addItem("Xbox 360", VDT.XBOX)
         self.device_type_combo.addItem("PlayStation 4", VDT.PS4)
-        header.addWidget(self.device_type_combo)
+        profile_row.addWidget(self.device_type_combo)
+        profile_row.addStretch()
+        header.addLayout(profile_row)
 
-        header.addStretch()
+        options_row = QHBoxLayout()
+        options_row.addStretch()
 
         self.export_btn = QPushButton("Exportar...")
         self.export_btn.setToolTip("Salvar este perfil como arquivo .ds4profile compartilhável")
         self.export_btn.clicked.connect(self._export_profile)
-        header.addWidget(self.export_btn)
+        options_row.addWidget(self.export_btn)
 
         self.import_btn = QPushButton("Importar...")
         self.import_btn.setToolTip("Carregar um perfil de um arquivo .ds4profile")
         self.import_btn.clicked.connect(self._import_profile)
-        header.addWidget(self.import_btn)
+        options_row.addWidget(self.import_btn)
 
         self.keep_size_cb = QCheckBox("Manter o tamanho da janela ao fechar")
-        header.addWidget(self.keep_size_cb)
+        options_row.addWidget(self.keep_size_cb)
+        header.addLayout(options_row)
         root.addLayout(header)
 
         # ---------------- body ----------------
-        body = QHBoxLayout()
+        body_widget = QWidget()
+        body = QHBoxLayout(body_widget)
         body.setSpacing(12)
 
         self.left_tabs = QTabWidget()
         self.left_tabs.setDocumentMode(True)
+        self.left_tabs.setAccessibleName("Controles e leituras físicas")
         self.left_tabs.addTab(self._build_controls_tab(), "Controles")
         self.left_tabs.addTab(self._build_readings_tab(), "Leituras")
         body.addWidget(self.left_tabs, 3)
 
         self.right_tabs = QTabWidget()
         self.right_tabs.setDocumentMode(True)
+        self.right_tabs.setAccessibleName("Configuração do perfil")
         self.right_tabs.addTab(_ScrollPage(self._build_axis_tab()), "Eixos")
         self.right_tabs.addTab(_ScrollPage(self._build_lightbar_tab()), "Lightbar")
         self.right_tabs.addTab(_ScrollPage(self._build_gyro_tab()), "Gyro")
         self.right_tabs.addTab(_ScrollPage(self._build_other_tab()), "Outros")
         body.addWidget(self.right_tabs, 2)
 
-        root.addLayout(body, 1)
+        body_scroll = QScrollArea()
+        body_scroll.setObjectName("profileEditorBodyScroll")
+        body_scroll.setWidgetResizable(True)
+        body_scroll.setFrameShape(QFrame.NoFrame)
+        body_scroll.setMinimumSize(0, 0)
+        body_scroll.setWidget(body_widget)
+        root.addWidget(body_scroll, 1)
 
         # ---------------- footer ----------------
         footer = QHBoxLayout()
@@ -169,6 +189,7 @@ class ProfileEditorWindow(QWidget):
         footer.addStretch()
         self.stop_btn = QPushButton("Parar")
         self.stop_btn.setObjectName("dangerButton")
+        self.stop_btn.setAccessibleName("Parar ou retomar a emulação do controle")
         self.stop_btn.setToolTip("Interromper a emulação deste controle")
         self.stop_btn.clicked.connect(self._stop_controller)
         footer.addWidget(self.stop_btn)
@@ -181,15 +202,26 @@ class ProfileEditorWindow(QWidget):
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(12)
 
-        self.mapping_tab = MappingTabWidget(
-            worker=self.slot.worker if self.slot is not None else None
-        )
+        self.mapping_tab = MappingTabWidget(worker=self.slot.worker if self.slot is not None else None)
         layout.addWidget(self.mapping_tab, 3)
 
         side = QVBoxLayout()
         side.setSpacing(10)
 
+        dpad_group = QGroupBox("Saída do D-Pad")
+        dpad_form = QFormLayout(dpad_group)
+        self.dpad_output_mode = QComboBox()
+        self.dpad_output_mode.addItem("HAT (padrão)", "hat")
+        self.dpad_output_mode.addItem("Botões direcionais", "buttons")
+        self.dpad_output_mode.setToolTip(
+            "Use Botões direcionais se o jogo não reconhecer o D-Pad no modo HAT."
+        )
+        dpad_form.addRow("Formato:", self.dpad_output_mode)
+        side.addWidget(dpad_group)
+
         touchpad_group = QGroupBox("Touchpad")
+        touchpad_group.setEnabled(False)
+        touchpad_group.setToolTip("A conversão do touchpad ainda não está implementada (FUT-09).")
         touchpad_form = QFormLayout(touchpad_group)
         touchpad_form.setSpacing(8)
         self.touchpad_mode = QComboBox()
@@ -201,21 +233,37 @@ class ProfileEditorWindow(QWidget):
         self.touchpad_jitter.setDecimals(2)
         touchpad_form.addRow("Jitter:", self.touchpad_jitter)
         side.addWidget(touchpad_group)
+        touchpad_notice = QLabel("Touchpad para mouse/controles indisponível nesta versão (FUT-09).")
+        touchpad_notice.setWordWrap(True)
+        touchpad_notice.setObjectName("dimLabel")
+        side.addWidget(touchpad_notice)
 
         rumble_group = QGroupBox("Vibração")
         rumble_form = QFormLayout(rumble_group)
         rumble_form.setSpacing(8)
         self.rumble_enable = QCheckBox("Habilitar vibração")
         self.rumble_enable.setChecked(True)
+        self.rumble_enable.setEnabled(False)
+        self.rumble_enable.setToolTip(
+            "O encaminhamento de vibração funciona; esta opção ainda não controla o motor."
+        )
         rumble_form.addRow(self.rumble_enable)
         self.rumble_intensity = QSpinBox()
         self.rumble_intensity.setRange(0, 100)
         self.rumble_intensity.setValue(100)
         self.rumble_intensity.setSuffix(" %")
+        self.rumble_intensity.setEnabled(False)
+        self.rumble_intensity.setToolTip("A intensidade configurável ainda não é aplicada ao perfil.")
         rumble_form.addRow("Intensidade:", self.rumble_intensity)
         self.rumble_test_btn = QPushButton("Testar vibração")
         self.rumble_test_btn.clicked.connect(self._test_rumble)
         rumble_form.addRow(self.rumble_test_btn)
+        rumble_notice = QLabel(
+            "A vibração recebida do jogo é encaminhada; habilitação e intensidade configuráveis estão indisponíveis."
+        )
+        rumble_notice.setWordWrap(True)
+        rumble_notice.setObjectName("dimLabel")
+        rumble_form.addRow(rumble_notice)
         side.addWidget(rumble_group)
 
         side.addStretch()
@@ -271,15 +319,24 @@ class ProfileEditorWindow(QWidget):
 
         self.btn_states: dict[int, QLabel] = {}
         all_btns = [
-            (DS4Btn.SOUTH, "✕"), (DS4Btn.EAST, "○"),
-            (DS4Btn.NORTH, "△"), (DS4Btn.WEST, "□"),
-            (DS4Btn.DPAD_UP, "↑"), (DS4Btn.DPAD_DOWN, "↓"),
-            (DS4Btn.DPAD_LEFT, "←"), (DS4Btn.DPAD_RIGHT, "→"),
-            (DS4Btn.TL, "L1"), (DS4Btn.TR, "R1"),
-            (DS4Btn.TL2, "L2"), (DS4Btn.TR2, "R2"),
-            (DS4Btn.SELECT, "Share"), (DS4Btn.START, "Options"),
-            (DS4Btn.THUMBL, "L3"), (DS4Btn.THUMBR, "R3"),
-            (DS4Btn.PS, "PS"), (DS4Btn.TOUCHPAD, "Touch"),
+            (DS4Btn.SOUTH, "✕"),
+            (DS4Btn.EAST, "○"),
+            (DS4Btn.NORTH, "△"),
+            (DS4Btn.WEST, "□"),
+            (DS4Btn.DPAD_UP, "↑"),
+            (DS4Btn.DPAD_DOWN, "↓"),
+            (DS4Btn.DPAD_LEFT, "←"),
+            (DS4Btn.DPAD_RIGHT, "→"),
+            (DS4Btn.TL, "L1"),
+            (DS4Btn.TR, "R1"),
+            (DS4Btn.TL2, "L2"),
+            (DS4Btn.TR2, "R2"),
+            (DS4Btn.SELECT, "Share"),
+            (DS4Btn.START, "Options"),
+            (DS4Btn.THUMBL, "L3"),
+            (DS4Btn.THUMBR, "R3"),
+            (DS4Btn.PS, "PS"),
+            (DS4Btn.TOUCHPAD, "Touch"),
         ]
         for i, (code, label) in enumerate(all_btns):
             row, col = divmod(i, 6)
@@ -292,6 +349,40 @@ class ProfileEditorWindow(QWidget):
             grid.addWidget(name, row, col * 2)
             grid.addWidget(state, row, col * 2 + 1)
         layout.addWidget(buttons_group)
+
+        diagnostic_group = QGroupBox("Diagnóstico do fluxo")
+        diagnostic_layout = QVBoxLayout(diagnostic_group)
+        self.physical_trace = QLabel("Entrada física: aguardando controle")
+        self.mapping_trace = QLabel("Mapeamento ativo: —")
+        self.virtual_trace = QLabel("Saída virtual: aguardando evento")
+        for label in (self.physical_trace, self.mapping_trace, self.virtual_trace):
+            label.setWordWrap(True)
+            diagnostic_layout.addWidget(label)
+
+        capture_row = QHBoxLayout()
+        self.capture_events = QCheckBox("Capturar sequência")
+        self.capture_events.setAccessibleName("Ativar captura de eventos físicos e virtuais")
+        capture_row.addWidget(self.capture_events)
+        self.clear_capture_btn = QPushButton("Limpar")
+        self.clear_capture_btn.setAccessibleName("Limpar captura de diagnóstico")
+        self.clear_capture_btn.clicked.connect(self._clear_diagnostic_capture)
+        capture_row.addWidget(self.clear_capture_btn)
+        self.export_capture_btn = QPushButton("Exportar...")
+        self.export_capture_btn.setAccessibleName("Exportar captura de diagnóstico")
+        self.export_capture_btn.clicked.connect(self._export_diagnostic_capture)
+        capture_row.addWidget(self.export_capture_btn)
+        diagnostic_layout.addLayout(capture_row)
+
+        self.capture_text = QTextEdit()
+        self.capture_text.setReadOnly(True)
+        self.capture_text.setPlaceholderText(
+            "Ative a captura e pressione botões para registrar a entrada e a saída."
+        )
+        self.capture_text.document().setMaximumBlockCount(300)
+        self.capture_text.setMinimumHeight(70)
+        self.capture_text.setMaximumHeight(120)
+        diagnostic_layout.addWidget(self.capture_text)
+        layout.addWidget(diagnostic_group)
 
         self.connection_status = QLabel("Conectado: nenhum controle")
         self.connection_status.setStyleSheet("color:#ff6b6b; font-weight:bold;")
@@ -473,6 +564,8 @@ class ProfileEditorWindow(QWidget):
         layout.setSpacing(12)
 
         group = QGroupBox("Giroscópio")
+        group.setEnabled(False)
+        group.setToolTip("A interface de mouse/calibração ainda não está implementada (FUT-08).")
         form = QFormLayout(group)
         form.setSpacing(8)
         self.gyro_enable = QCheckBox("Habilitar giroscópio")
@@ -485,6 +578,13 @@ class ProfileEditorWindow(QWidget):
         self.gyro_calibrate_btn = QPushButton("Calibrar")
         form.addRow(self.gyro_calibrate_btn)
         layout.addWidget(group)
+        notice = QLabel(
+            "Mouse e calibração por giroscópio estão indisponíveis (FUT-08). "
+            "O fluxo de movimento DSU para emuladores permanece ativo."
+        )
+        notice.setWordWrap(True)
+        notice.setObjectName("dimLabel")
+        layout.addWidget(notice)
         layout.addStretch()
         return page
 
@@ -499,12 +599,13 @@ class ProfileEditorWindow(QWidget):
         led_layout = QFormLayout(led_group)
         led_layout.setSpacing(8)
         self.led_mode = QComboBox()
-        self.led_mode.addItems([
-            "Cor fixa do perfil",
-            "Indicador de bateria",
-            "Pulsar",
-            "Arco-íris",
-        ])
+        self.led_mode.addItems(
+            [
+                "Cor fixa do perfil",
+            ]
+        )
+        self.led_mode.setEnabled(False)
+        self.led_mode.setToolTip("Somente a cor fixa do perfil está implementada.")
         led_layout.addRow("Modo:", self.led_mode)
         layout.addWidget(led_group)
 
@@ -513,12 +614,21 @@ class ProfileEditorWindow(QWidget):
         conn_layout.setSpacing(8)
         self.auto_reconnect = QCheckBox("Reconectar automaticamente")
         self.auto_reconnect.setChecked(True)
+        self.auto_reconnect.setEnabled(False)
+        self.auto_reconnect.setToolTip(
+            "A reconexão é gerenciada automaticamente pelo aplicativo e não é configurável por perfil."
+        )
         conn_layout.addRow(self.auto_reconnect)
         self.poll_rate = QComboBox()
         self._poll_values = [1, 2, 4, 10]
-        self.poll_rate.addItems([
-            "1 ms (1000 Hz)", "2 ms (500 Hz)", "4 ms (250 Hz)", "10 ms (100 Hz)",
-        ])
+        self.poll_rate.addItems(
+            [
+                "1 ms (1000 Hz)",
+                "2 ms (500 Hz)",
+                "4 ms (250 Hz)",
+                "10 ms (100 Hz)",
+            ]
+        )
         conn_layout.addRow("Polling:", self.poll_rate)
         layout.addWidget(conn_group)
 
@@ -531,27 +641,43 @@ class ProfileEditorWindow(QWidget):
     def _connect_signals(self):
         self.device_type_combo.currentIndexChanged.connect(self._on_device_type_changed)
         self.lightbar_brightness.valueChanged.connect(self._on_lightbar_brightness)
-        self.gyro_calibrate_btn.clicked.connect(
-            lambda: QMessageBox.information(self, "Gyro", "Calibração registrada.")
-        )
         worker = self.slot.worker if self.slot is not None else None
         if worker is not None:
             try:
                 worker.raw_event.connect(self._on_raw_event)
+                worker.mapped_event.connect(self._on_mapped_event)
                 self._raw_worker = worker
             except Exception:
                 logger.debug("Could not connect worker.raw_event", exc_info=True)
+        if self.slot is not None:
+            for signal_name in ("status_changed", "device_connected", "device_disconnected"):
+                signal = getattr(self.slot, signal_name, None)
+                handler = self._refresh_connection_state
+                if signal is not None:
+                    try:
+                        signal.connect(handler)
+                    except (AttributeError, RuntimeError, TypeError):
+                        logger.debug("Could not connect slot %s", signal_name, exc_info=True)
 
     # ------------------------------------------------------------------
     # Profile load/save
     # ------------------------------------------------------------------
-    def _load_current_profile(self):
-        name = self.profile_manager.get_current_profile_name() or "Default"
-        self._current_profile = self.profile_manager.load_profile(name)
+    def _load_current_profile(self, profile_name: str | None = None):
+        if profile_name:
+            self._current_profile = self.profile_manager.load_profile(
+                profile_name,
+                remember=False,
+            )
+        elif self.slot is not None and self.slot.profile is not None:
+            self._current_profile = copy.deepcopy(self.slot.profile)
+        else:
+            name = self.profile_manager.get_current_profile_name() or "Default"
+            self._current_profile = self.profile_manager.load_profile(name)
         if not self._current_profile:
             self._current_profile = ProfileConfig(name="Default")
         self.profile_name_edit.setText(self._current_profile.name)
         self._apply_profile_to_ui()
+        self._refresh_connection_state()
 
     def _apply_profile_to_ui(self):
         profile = self._current_profile
@@ -568,31 +694,68 @@ class ProfileEditorWindow(QWidget):
         self.mapping_tab.set_device_type(profile.device_type)
         self.mapping_tab.set_mappings(profile.button_maps)
         self.mapping_tab.set_macros(profile.macros)
+        output_mode = self.dpad_output_mode.findData(profile.dpad_output_mode)
+        self.dpad_output_mode.setCurrentIndex(max(0, output_mode))
 
-        self._fill_axis_widgets(profile.left_stick, self.ls_deadzone, self.ls_maxzone,
-                                self.ls_antideadzone, self.ls_sensitivity, self.ls_curve,
-                                self.ls_square, self.ls_square_value, self.ls_rotation,
-                                self.ls_inverted)
-        self._fill_axis_widgets(profile.right_stick, self.rs_deadzone, self.rs_maxzone,
-                                self.rs_antideadzone, self.rs_sensitivity, self.rs_curve,
-                                self.rs_square, self.rs_square_value, self.rs_rotation,
-                                self.rs_inverted)
-        self._fill_trigger_widgets(profile.left_trigger, self.lt_deadzone, self.lt_maxzone,
-                                   self.lt_antideadzone, self.lt_sensitivity)
-        self._fill_trigger_widgets(profile.right_trigger, self.rt_deadzone, self.rt_maxzone,
-                                   self.rt_antideadzone, self.rt_sensitivity)
+        self._fill_axis_widgets(
+            profile.left_stick,
+            self.ls_deadzone,
+            self.ls_maxzone,
+            self.ls_antideadzone,
+            self.ls_sensitivity,
+            self.ls_curve,
+            self.ls_square,
+            self.ls_square_value,
+            self.ls_rotation,
+            self.ls_inverted,
+        )
+        self._fill_axis_widgets(
+            profile.right_stick,
+            self.rs_deadzone,
+            self.rs_maxzone,
+            self.rs_antideadzone,
+            self.rs_sensitivity,
+            self.rs_curve,
+            self.rs_square,
+            self.rs_square_value,
+            self.rs_rotation,
+            self.rs_inverted,
+        )
+        self._fill_trigger_widgets(
+            profile.left_trigger, self.lt_deadzone, self.lt_maxzone, self.lt_antideadzone, self.lt_sensitivity
+        )
+        self._fill_trigger_widgets(
+            profile.right_trigger,
+            self.rt_deadzone,
+            self.rt_maxzone,
+            self.rt_antideadzone,
+            self.rt_sensitivity,
+        )
 
         self._set_led_color(profile.led_color, update_profile=False)
         self.lightbar_brightness.setValue(profile.led_brightness)
-        poll_index = self._poll_values.index(profile.poll_rate_ms) \
-            if profile.poll_rate_ms in self._poll_values else len(self._poll_values) - 1
+        poll_index = (
+            self._poll_values.index(profile.poll_rate_ms)
+            if profile.poll_rate_ms in self._poll_values
+            else len(self._poll_values) - 1
+        )
         self.poll_rate.setCurrentIndex(poll_index)
 
         self._update_status_label()
 
     @staticmethod
-    def _fill_axis_widgets(cfg: AxisConfig, deadzone, maxzone, antideadzone,
-                           sensitivity, curve, square, square_value, rotation, inverted):
+    def _fill_axis_widgets(
+        cfg: AxisConfig,
+        deadzone,
+        maxzone,
+        antideadzone,
+        sensitivity,
+        curve,
+        square,
+        square_value,
+        rotation,
+        inverted,
+    ):
         deadzone.setValue(cfg.deadzone)
         maxzone.setValue(cfg.max_zone)
         antideadzone.setValue(cfg.anti_deadzone)
@@ -617,9 +780,10 @@ class ProfileEditorWindow(QWidget):
             QMessageBox.warning(self, "Nome vazio", "Informe um nome para o perfil.")
             return
 
-        profile = self._current_profile or ProfileConfig(name=name)
+        profile = copy.deepcopy(self._current_profile or ProfileConfig(name=name))
         profile.name = name
         profile.device_type = self.device_type_combo.currentData() or VDT.XBOX
+        profile.dpad_output_mode = self.dpad_output_mode.currentData() or "hat"
         profile.button_maps = self.mapping_tab.get_mappings()
         profile.macros = self.mapping_tab.get_macros()
 
@@ -666,7 +830,15 @@ class ProfileEditorWindow(QWidget):
             return
 
         if self.slot is not None:
-            self.slot.set_profile(profile)
+            applied = self.slot.set_profile(copy.deepcopy(profile))
+            if applied is False:
+                QMessageBox.warning(
+                    self,
+                    "Perfil salvo",
+                    "O perfil foi salvo, mas o controle não pôde ser atualizado "
+                    "com segurança. Ele continuará usando o perfil anterior até "
+                    "a próxima tentativa.",
+                )
 
         self.profile_saved.emit(name)
         self.save_requested.emit()
@@ -681,8 +853,9 @@ class ProfileEditorWindow(QWidget):
     # Import / export (.ds4profile)
     # ------------------------------------------------------------------
     def _export_profile(self):
-        name = self.profile_name_edit.text().strip() or \
-            (self._current_profile.name if self._current_profile else "")
+        name = self.profile_name_edit.text().strip() or (
+            self._current_profile.name if self._current_profile else ""
+        )
         if not name:
             QMessageBox.warning(self, "Exportar", "Salve o perfil antes de exportar.")
             return
@@ -705,13 +878,10 @@ class ProfileEditorWindow(QWidget):
             return
         name = self.profile_manager.import_profile(src)
         if not name:
-            QMessageBox.critical(
-                self, "Erro", "Não foi possível importar o perfil (arquivo inválido?)."
-            )
+            QMessageBox.critical(self, "Erro", "Não foi possível importar o perfil (arquivo inválido?).")
             return
-        QMessageBox.information(self, "Importar", f"Perfil \"{name}\" importado.")
-        self.profile_name_edit.setText(name)
-        self._load_current_profile()
+        QMessageBox.information(self, "Importar", f'Perfil "{name}" importado.')
+        self._load_current_profile(name)
         self.profile_saved.emit(name)
 
     def _on_device_type_changed(self):
@@ -719,8 +889,6 @@ class ProfileEditorWindow(QWidget):
         if not device_type:
             return
         self.mapping_tab.set_device_type(device_type)
-        if self.slot is not None and self.slot.virtual_device is not None:
-            self.slot.virtual_device.set_device_type(device_type)
 
     def _set_led_color(self, rgb, update_profile=True):
         color = QColor(*rgb)
@@ -729,11 +897,6 @@ class ProfileEditorWindow(QWidget):
         )
         if update_profile and self._current_profile:
             self._current_profile.led_color = (color.red(), color.green(), color.blue())
-        if self.slot is not None and hasattr(self.slot, "set_led_color"):
-            try:
-                self.slot.set_led_color(color.red(), color.green(), color.blue())
-            except Exception:
-                logger.debug("Failed to push LED color to slot", exc_info=True)
 
     def _pick_lightbar_color(self):
         current = QColor(*(self._current_profile.led_color if self._current_profile else (0, 212, 170)))
@@ -751,20 +914,29 @@ class ProfileEditorWindow(QWidget):
     def _on_raw_event(self, event_type: int, code: int, value: int):
         from evdev import ecodes as e
 
+        self._record_physical_trace(event_type, code, value)
+
         if event_type == e.EV_KEY:
             ds4_code = {
-                e.BTN_SOUTH: DS4Btn.SOUTH, e.BTN_EAST: DS4Btn.EAST,
-                e.BTN_NORTH: DS4Btn.NORTH, e.BTN_WEST: DS4Btn.WEST,
-                e.BTN_TL: DS4Btn.TL, e.BTN_TR: DS4Btn.TR,
-                e.BTN_THUMBL: DS4Btn.THUMBL, e.BTN_THUMBR: DS4Btn.THUMBR,
-                e.BTN_START: DS4Btn.START, e.BTN_SELECT: DS4Btn.SELECT,
+                e.BTN_SOUTH: DS4Btn.SOUTH,
+                e.BTN_EAST: DS4Btn.EAST,
+                e.BTN_NORTH: DS4Btn.NORTH,
+                e.BTN_WEST: DS4Btn.WEST,
+                e.BTN_TL: DS4Btn.TL,
+                e.BTN_TR: DS4Btn.TR,
+                e.BTN_THUMBL: DS4Btn.THUMBL,
+                e.BTN_THUMBR: DS4Btn.THUMBR,
+                e.BTN_START: DS4Btn.START,
+                e.BTN_SELECT: DS4Btn.SELECT,
                 e.BTN_MODE: DS4Btn.PS,
                 e.BTN_TOUCH: DS4Btn.TOUCHPAD,
-                e.BTN_DPAD_UP: DS4Btn.DPAD_UP, e.BTN_DPAD_DOWN: DS4Btn.DPAD_DOWN,
-                e.BTN_DPAD_LEFT: DS4Btn.DPAD_LEFT, e.BTN_DPAD_RIGHT: DS4Btn.DPAD_RIGHT,
+                e.BTN_DPAD_UP: DS4Btn.DPAD_UP,
+                e.BTN_DPAD_DOWN: DS4Btn.DPAD_DOWN,
+                e.BTN_DPAD_LEFT: DS4Btn.DPAD_LEFT,
+                e.BTN_DPAD_RIGHT: DS4Btn.DPAD_RIGHT,
             }.get(code)
             if ds4_code is not None:
-                self._set_button_state(ds4_code, value == 1)
+                self._set_button_state(ds4_code, value != 0)
 
         elif event_type == e.EV_ABS:
             if code in (e.ABS_HAT0X, e.ABS_HAT0Y):
@@ -779,9 +951,12 @@ class ProfileEditorWindow(QWidget):
                 return
 
             bars = {
-                e.ABS_X: self.ls_x_bar, e.ABS_Y: self.ls_y_bar,
-                e.ABS_RX: self.rs_x_bar, e.ABS_RY: self.rs_y_bar,
-                e.ABS_Z: self.l2_bar, e.ABS_RZ: self.r2_bar,
+                e.ABS_X: self.ls_x_bar,
+                e.ABS_Y: self.ls_y_bar,
+                e.ABS_RX: self.rs_x_bar,
+                e.ABS_RY: self.rs_y_bar,
+                e.ABS_Z: self.l2_bar,
+                e.ABS_RZ: self.r2_bar,
             }
             bar = bars.get(code)
             if bar is not None:
@@ -789,15 +964,112 @@ class ProfileEditorWindow(QWidget):
                     value = int((value - 128) * 258)
                 bar.setValue(max(bar.minimum(), min(bar.maximum(), value)))
 
+    def _record_physical_trace(self, event_type: int, code: int, value: int):
+        from evdev import ecodes as e
+
+        profile = self._current_profile
+        device_type = self.device_type_combo.currentData() or VDT.XBOX
+        if event_type == e.EV_KEY:
+            name = physical_name(code)
+            state = "pressionado" if value == 1 else "repetição" if value == 2 else "solto"
+            if profile and code in profile.macros:
+                mapping = "macro; observe as etapas na captura"
+            elif (
+                profile
+                and code
+                in (
+                    int(DS4Btn.DPAD_UP),
+                    int(DS4Btn.DPAD_DOWN),
+                    int(DS4Btn.DPAD_LEFT),
+                    int(DS4Btn.DPAD_RIGHT),
+                )
+                and profile.dpad_output_mode == "hat"
+            ):
+                mapping = "D-Pad → HAT"
+            else:
+                destination = profile.button_maps.get(code, code) if profile else code
+                mapping = f"{name} → {target_name(destination, device_type)}"
+            self.physical_trace.setText(f"Entrada física: {name} — {state}")
+            self._trace_mapping_text = f"Mapeamento ativo: {mapping}"
+            self.mapping_trace.setText(self._trace_mapping_text)
+            event_line = f"IN EV_KEY {name} {state}; {mapping}"
+        elif event_type == e.EV_ABS:
+            axis_name = e.ABS.get(code, f"ABS_{code}")
+            if code in (e.ABS_HAT0X, e.ABS_HAT0Y):
+                axis_direction = (
+                    "centro"
+                    if value == 0
+                    else ("esquerda" if value < 0 else "direita")
+                    if code == e.ABS_HAT0X
+                    else ("cima" if value < 0 else "baixo")
+                )
+                mapping = (
+                    f"D-Pad {axis_direction} → "
+                    f"{'HAT' if profile and profile.dpad_output_mode == 'hat' else 'botões'}"
+                )
+            else:
+                mapping = "ajustes de eixo do perfil"
+            self.physical_trace.setText(f"Entrada física: {axis_name} = {value}")
+            self._trace_mapping_text = f"Mapeamento ativo: {mapping}"
+            self.mapping_trace.setText(self._trace_mapping_text)
+            event_line = f"IN EV_ABS {axis_name} = {value}; {mapping}"
+        else:
+            return
+        self._append_diagnostic_event(event_line)
+
+    def _on_mapped_event(self, event_type: int, code: int, value: int):
+        from evdev import ecodes as e
+
+        device_type = self.device_type_combo.currentData() or VDT.XBOX
+        if event_type == e.EV_KEY:
+            name = target_name(code, device_type)
+            state = "pressionado" if value else "solto"
+            self.virtual_trace.setText(f"Saída virtual: {name} — {state}")
+            event_line = f"OUT EV_KEY {name} {state}"
+        elif event_type == e.EV_ABS:
+            name = e.ABS.get(code, f"ABS_{code}")
+            self.virtual_trace.setText(f"Saída virtual: {name} = {value}")
+            event_line = f"OUT EV_ABS {name} = {value}"
+        else:
+            return
+        self._append_diagnostic_event(event_line)
+
+    def _append_diagnostic_event(self, event_line: str):
+        if self.capture_events.isChecked():
+            timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+            self.capture_text.append(f"{timestamp} {event_line}")
+
+    def _clear_diagnostic_capture(self):
+        self.capture_text.clear()
+        self.physical_trace.setText("Entrada física: aguardando controle")
+        self.mapping_trace.setText("Mapeamento ativo: —")
+        self.virtual_trace.setText("Saída virtual: aguardando evento")
+
+    def _export_diagnostic_capture(self):
+        content = self.capture_text.toPlainText()
+        if not content:
+            QMessageBox.information(self, "Captura", "Não há eventos capturados para exportar.")
+            return
+        path, _filter = QFileDialog.getSaveFileName(
+            self, "Exportar captura de entrada", "ds4linux-input-capture.txt", "Texto (*.txt)"
+        )
+        if not path:
+            return
+        try:
+            Path(path).write_text(content + "\n", encoding="utf-8")
+        except OSError as exc:
+            QMessageBox.critical(self, "Erro ao exportar", str(exc))
+            return
+        QMessageBox.information(
+            self, "Captura", "Captura exportada sem IDs de dispositivo ou identificadores pessoais."
+        )
+
     def _set_button_state(self, code: int, pressed: bool):
         label = self.btn_states.get(code)
         if label is None:
             return
         label.setText("●" if pressed else "○")
-        label.setStyleSheet(
-            "font-size:14px; color:#00d4aa;" if pressed
-            else "font-size:14px; color:#5a5f73;"
-        )
+        label.setStyleSheet("font-size:14px; color:#00d4aa;" if pressed else "font-size:14px; color:#5a5f73;")
 
     def set_connected(self, connected: bool, device_name: str = ""):
         if connected:
@@ -809,9 +1081,25 @@ class ProfileEditorWindow(QWidget):
 
     def _update_status_label(self):
         name = self._current_profile.name if self._current_profile else "?"
-        self.status_label.setText(
-            f"Controle {self.slot_id + 1} usando o perfil \"{name}\""
+        connected = bool(self.slot is not None and getattr(self.slot, "is_connected", False))
+        state = "conectado" if connected else "desconectado"
+        self.status_label.setText(f'Controle {self.slot_id + 1} {state} — perfil "{name}"')
+
+    def _refresh_connection_state(self, *_args):
+        connected = bool(self.slot is not None and getattr(self.slot, "is_connected", False))
+        device = getattr(self.slot, "physical_device", None) if connected else None
+        name = getattr(device, "name", "controle") if connected else ""
+        self.set_connected(connected, name)
+        worker = getattr(self.slot, "worker", None) if connected else None
+        running = bool(worker is not None and worker.isRunning())
+        self.stop_btn.setEnabled(connected)
+        self.stop_btn.setText("Parar" if running else "Retomar")
+        self.stop_btn.setToolTip(
+            "Interromper a emulação deste controle"
+            if running
+            else "Retomar a leitura e emulação deste controle"
         )
+        self._update_status_label()
 
     # ------------------------------------------------------------------
     # Misc
@@ -828,14 +1116,41 @@ class ProfileEditorWindow(QWidget):
                 return
         QMessageBox.information(self, "Vibração", "Controle não conectado.")
 
-    def _stop_controller(self):
+    def _toggle_controller_worker(self):
         if self.slot is None:
             return
+        worker = getattr(self.slot, "worker", None)
+        if worker is None:
+            return
         try:
-            self.slot.stop_worker()
+            if worker.isRunning():
+                stopped = self.slot.stop_worker()
+                if stopped is False:
+                    QMessageBox.warning(
+                        self,
+                        "Controle ocupado",
+                        "A thread de entrada ainda está encerrando. O dispositivo foi "
+                        "mantido aberto para evitar corrupção; tente novamente.",
+                    )
+                    self._refresh_connection_state()
+                    return
+                self.status_label.setText(f"Controle {self.slot_id + 1} parado.")
+                self._refresh_connection_state()
+                return
+            if not getattr(self.slot, "is_connected", False):
+                return
+            self.slot.start_worker()
+            self.stop_btn.setText("Parar")
+            self.stop_btn.setToolTip("Interromper a emulação deste controle")
+            QTimer.singleShot(100, self._refresh_connection_state)
         except Exception:
-            logger.debug("stop_worker failed", exc_info=True)
-        self.status_label.setText(f"Controle {self.slot_id + 1} parado.")
+            logger.exception("Could not toggle controller worker")
+            QMessageBox.warning(self, "Controle", "Não foi possível alterar o estado do controle.")
+            self._refresh_connection_state()
+
+    def _stop_controller(self):
+        """Compatibility name retained for integrations that invoke the old slot."""
+        self._toggle_controller_worker()
 
     def _disconnect_raw_worker(self):
         # Drop the worker.raw_event connection so discarding the editor
@@ -846,7 +1161,19 @@ class ProfileEditorWindow(QWidget):
                 raw_worker.raw_event.disconnect(self._on_raw_event)
             except (RuntimeError, TypeError):
                 pass
+            try:
+                raw_worker.mapped_event.disconnect(self._on_mapped_event)
+            except (AttributeError, RuntimeError, TypeError):
+                pass
             self._raw_worker = None
+        if self.slot is not None:
+            for signal_name in ("status_changed", "device_connected", "device_disconnected"):
+                signal = getattr(self.slot, signal_name, None)
+                if signal is not None:
+                    try:
+                        signal.disconnect(self._refresh_connection_state)
+                    except (AttributeError, RuntimeError, TypeError):
+                        pass
 
     def cleanup(self):
         """Release external references before the widget is discarded.
@@ -869,4 +1196,5 @@ class ProfileEditorWindow(QWidget):
 
 class ProfileTabWidget(ProfileEditorWindow):
     """Backwards-compatible alias."""
+
     pass

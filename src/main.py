@@ -4,17 +4,14 @@ import signal
 import sys
 from pathlib import Path
 
+from PySide6.QtGui import QIcon
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication
 
 from .constants import APP_VERSION
-from .engine.system_checker import (
-    _has_stored_password,
-    auto_setup,
-    needs_setup,
-)
+from .engine.system_checker import discard_legacy_sudo_secret
 from .gui.main_window import MainWindow
-from .gui.setup_dialog import SetupDialog
+from .resource_paths import resource_path
 
 logging.basicConfig(
     level=logging.INFO,
@@ -90,14 +87,28 @@ class InstanceChecker:
         self._show_callback = window.show_normal
 
 
+def configure_application_identity(app: QApplication) -> None:
+    """Set Linux desktop identity and an icon for taskbars and window lists."""
+    app.setApplicationName("DS4Linux")
+    app.setApplicationDisplayName("DS4Linux")
+    app.setApplicationVersion(APP_VERSION)
+    app.setOrganizationName("DS4Linux")
+    app.setOrganizationDomain("ds4linux.app")
+    # Qt expects the .desktop basename without its path or extension.
+    app.setDesktopFileName("ds4linux")
+
+    icon_path = resource_path("assets", "icon.png")
+    if icon_path.is_file():
+        app.setWindowIcon(QIcon(str(icon_path)))
+    else:
+        logger.warning("Application icon not found: %s", icon_path)
+
+
 def main():
     signal.signal(signal.SIGINT, signal.SIG_DFL)
 
     app = QApplication(sys.argv)
-    app.setApplicationName("DS4Linux")
-    app.setApplicationVersion(APP_VERSION)
-    app.setOrganizationName("DS4Linux")
-    app.setOrganizationDomain("ds4linux.app")
+    configure_application_identity(app)
     app.setQuitOnLastWindowClosed(False)
 
     # Check for single instance
@@ -106,26 +117,15 @@ def main():
         print("DS4Linux is already running. Bringing existing window to focus.")
         return 0
 
-    # Try automatic setup using stored password (no dialog if password exists)
-    setup_needed = needs_setup()
+    if discard_legacy_sudo_secret():
+        from PySide6.QtWidgets import QMessageBox
 
-    if setup_needed:
-        if _has_stored_password():
-            # Password exists — try auto-setup silently
-            logger.info("Stored password found, running automatic setup...")
-            ok, msgs = auto_setup()
-            if ok:
-                logger.info("Auto-setup succeeded")
-            else:
-                # Auto-setup failed — show dialog to retry
-                logger.warning("Auto-setup failed: %s", msgs)
-                dlg = SetupDialog()
-                dlg.exec()
-        else:
-            # No password stored — show setup dialog
-            logger.info("No stored password, showing setup dialog...")
-            dlg = SetupDialog()
-            dlg.exec()
+        QMessageBox.information(
+            None,
+            "Credencial antiga removida",
+            "Uma credencial administrativa salva por uma versão anterior foi removida sem ser lida. "
+            "Quando necessário, a autorização será solicitada pelo sistema e não será armazenada.",
+        )
 
     window = MainWindow()
     checker.set_window(window)

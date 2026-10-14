@@ -1,22 +1,21 @@
-"""Integration test for the worker's evdev D-pad path.
-
-Exercises the exact code used by ``WorkerThread`` when hid-sony reports
-``BTN_DPAD_*`` key events: ``DpadState`` + ``WorkerThread._write_hat``.
-"""
+"""Regression tests for D-pad normalization and profile mapping."""
 
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 from evdev import ecodes as e
 
-from src.constants import XBOX_ABS_MAP, DS4Abs, XboxAbs
-from src.engine.dpad import LEFT, RIGHT, UP, DpadState
+from src.constants import DS4_TO_PS4_BTN_MAP, DS4_TO_XBOX_BTN_MAP, PS4Btn, XboxBtn
+from src.engine.dpad import LEFT, RIGHT, UP
+from src.engine.input_mapper import InputMapper, ProfileConfig
+from src.engine.virtual_device import VirtualDeviceType
 from src.engine.worker_thread import WorkerThread
 from tests.helpers import make_bt_report, make_usb_hidraw_report
 
 
 class FakeVirtualDevice:
-    """Captures EV_ABS writes and syncs emitted by the worker."""
+    """Captures virtual events and syncs emitted by the worker."""
 
     def __init__(self):
         self.events = []
@@ -31,29 +30,38 @@ class FakeVirtualDevice:
 
 class TestWorkerDpadPath(unittest.TestCase):
     def setUp(self):
+        self.worker = WorkerThread()
         self.vdev = FakeVirtualDevice()
-        self.axis_state = {}
-        self.dpad = DpadState()
-    def _apply(self, direction, pressed):
-        changed = self.dpad.update(direction, pressed)
-        if changed:
-            WorkerThread._write_hat(
-                self.vdev.write_event, self.vdev.sync, XBOX_ABS_MAP,
-                self.axis_state, self.dpad.x, self.dpad.y,
-                e.ABS_HAT0X, e.ABS_HAT0Y,
-            )
-        return changed
+        self.mapper = InputMapper(ProfileConfig(
+            dpad_output_mode="buttons",
+            button_maps={int(k): int(v) for k, v in DS4_TO_XBOX_BTN_MAP.items()},
+        ))
+        self.dpad = set()
 
-    def _hat_events(self):
-        return [ev for ev in self.vdev.events if ev[0] == e.EV_ABS]
+    def _apply(self, direction, pressed):
+        code = {UP: e.BTN_DPAD_UP, "down": e.BTN_DPAD_DOWN,
+                LEFT: e.BTN_DPAD_LEFT, RIGHT: e.BTN_DPAD_RIGHT}[direction]
+        if pressed:
+            self.dpad.add(code)
+        else:
+            self.dpad.discard(code)
+        before = len(self.vdev.events)
+        self.worker._set_dpad_source(
+            "evdev-key", self.dpad, self.mapper,
+            self.vdev.write_event, self.vdev.sync,
+        )
+        return len(self.vdev.events) != before
+
+    def _key_events(self):
+        return [ev for ev in self.vdev.events if ev[0] == e.EV_KEY]
 
     def test_cardinal_press_and_release(self):
         self._apply(UP, True)
-        self.assertEqual(self._hat_events(), [(e.EV_ABS, XboxAbs.HAT0Y, -1)])
+        self.assertEqual(self._key_events(), [(e.EV_KEY, XboxBtn.DPAD_UP, 1)])
         self._apply(UP, False)
         self.assertEqual(
-            self._hat_events(),
-            [(e.EV_ABS, XboxAbs.HAT0Y, -1), (e.EV_ABS, XboxAbs.HAT0Y, 0)],
+            self._key_events(),
+            [(e.EV_KEY, XboxBtn.DPAD_UP, 1), (e.EV_KEY, XboxBtn.DPAD_UP, 0)],
         )
 
     def test_stuck_diagonal_regression(self):
@@ -62,14 +70,12 @@ class TestWorkerDpadPath(unittest.TestCase):
         self._apply(LEFT, True)
         self._apply(UP, False)
 
-        self.assertEqual(self.axis_state[e.ABS_HAT0Y], 0)
-        self.assertEqual(self.axis_state[e.ABS_HAT0X], -1)
-        self.assertEqual(self.dpad.y, 0)
-        self.assertEqual(self.dpad.x, -1)
+        self.assertIn((e.EV_KEY, XboxBtn.DPAD_UP, 0), self.vdev.events)
+        self.assertIn((e.EV_KEY, XboxBtn.DPAD_LEFT, 1), self.vdev.events)
 
         self._apply(LEFT, False)
-        self.assertEqual(self.axis_state[e.ABS_HAT0X], 0)
-        self.assertEqual(self.axis_state[e.ABS_HAT0Y], 0)
+        self.assertEqual(self.mapper.button_state[e.BTN_DPAD_LEFT], False)
+        self.assertEqual(self.mapper.button_state[e.BTN_DPAD_UP], False)
 
     def test_no_duplicate_writes_on_repeat(self):
         self._apply(UP, True)
@@ -82,40 +88,201 @@ class TestWorkerDpadPath(unittest.TestCase):
         self._apply(RIGHT, True)
         self._apply(UP, False)
         self._apply(RIGHT, False)
-        self.assertEqual(self.axis_state[e.ABS_HAT0X], 0)
-        self.assertEqual(self.axis_state[e.ABS_HAT0Y], 0)
+        self.assertEqual(self.mapper.button_state[e.BTN_DPAD_RIGHT], False)
+        self.assertEqual(self.mapper.button_state[e.BTN_DPAD_UP], False)
 
-    def test_hat_written_for_ps4_profile_too(self):
-        """The PS4 map must drive _write_hat with real HAT writes — the
-        old assertion only checked that the map contains the codes."""
-        from src.constants import PS4_ABS_MAP
+    def test_ps4_profile_uses_its_direction_destinations(self):
+        self.mapper.set_profile(ProfileConfig(
+            device_type=VirtualDeviceType.PS4,
+            dpad_output_mode="buttons",
+            button_maps={int(k): int(v) for k, v in DS4_TO_PS4_BTN_MAP.items()},
+        ))
+        self.dpad.clear()
+        self.worker._dpad_sources.clear()
+        self.worker._dpad_effective = set()
+        self.vdev.events.clear()
+        self._apply(LEFT, True)
+        self._apply(UP, True)
+        self._apply(LEFT, False)
+        self._apply(UP, False)
+        self.assertIn((e.EV_KEY, PS4Btn.DPAD_LEFT, 1), self.vdev.events)
+        self.assertIn((e.EV_KEY, PS4Btn.DPAD_UP, 1), self.vdev.events)
 
-        self.dpad = DpadState()
-        self.axis_state = {}
+    def test_removed_direction_is_suppressed(self):
+        self.mapper.profile.button_maps.pop(e.BTN_DPAD_UP)
+        self._apply(UP, True)
+        self._apply(UP, False)
+        self.assertEqual(self._key_events(), [])
 
-        def apply_ps4(direction, pressed):
-            changed = self.dpad.update(direction, pressed)
-            if changed:
-                WorkerThread._write_hat(
-                    self.vdev.write_event, self.vdev.sync, PS4_ABS_MAP,
-                    self.axis_state, self.dpad.x, self.dpad.y,
-                    e.ABS_HAT0X, e.ABS_HAT0Y,
-                )
-            return changed
+    def test_direction_can_be_remapped_to_another_button(self):
+        self.mapper.profile.button_maps[e.BTN_DPAD_UP] = e.BTN_A
+        self._apply(UP, True)
+        self._apply(UP, False)
+        self.assertEqual(self._key_events(), [(e.EV_KEY, e.BTN_A, 1), (e.EV_KEY, e.BTN_A, 0)])
 
-        apply_ps4(LEFT, True)    # HAT0X=-1
-        apply_ps4(UP, True)      # diagonal HAT0Y=-1
-        apply_ps4(LEFT, False)   # HAT0X=0
-        apply_ps4(UP, False)     # HAT0Y=0
-
-        self.assertEqual(self.axis_state[e.ABS_HAT0X], 0)
-        self.assertEqual(self.axis_state[e.ABS_HAT0Y], 0)
-        self.assertIn(
-            (e.EV_ABS, PS4_ABS_MAP[DS4Abs.HAT0X], -1), self.vdev.events
+    def test_evdev_hat_uses_the_same_mapping_and_releases(self):
+        mark_sync = self.vdev.sync
+        self.worker._process_dpad_hat(
+            e.ABS_HAT0Y, -1, self.mapper, self.vdev.write_event, mark_sync,
         )
-        self.assertIn(
-            (e.EV_ABS, PS4_ABS_MAP[DS4Abs.HAT0Y], -1), self.vdev.events
+        self.worker._process_dpad_hat(
+            e.ABS_HAT0Y, 0, self.mapper, self.vdev.write_event, mark_sync,
         )
+        self.assertEqual(self._key_events(), [
+            (e.EV_KEY, XboxBtn.DPAD_UP, 1),
+            (e.EV_KEY, XboxBtn.DPAD_UP, 0),
+        ])
+
+    def test_opposite_directions_cancel_and_resume(self):
+        self._apply(UP, True)
+        self._apply("down", True)
+        self._apply(UP, False)
+        self.assertIn((e.EV_KEY, XboxBtn.DPAD_UP, 0), self.vdev.events)
+        self.assertIn((e.EV_KEY, XboxBtn.DPAD_DOWN, 1), self.vdev.events)
+
+    def test_hat_axis_change_updates_only_effective_direction(self):
+        self.worker._process_dpad_hat(
+            e.ABS_HAT0X, -1, self.mapper, self.vdev.write_event, self.vdev.sync,
+        )
+        self.worker._process_dpad_hat(
+            e.ABS_HAT0Y, -1, self.mapper, self.vdev.write_event, self.vdev.sync,
+        )
+        self.assertEqual(self._key_events(), [
+            (e.EV_KEY, XboxBtn.DPAD_LEFT, 1),
+            (e.EV_KEY, XboxBtn.DPAD_UP, 1),
+        ])
+
+
+class TestWorkerDpadHatOutput(unittest.TestCase):
+    """The backwards-compatible profile mode emits absolute HAT axes."""
+
+    def setUp(self):
+        self.worker = WorkerThread()
+        self.vdev = FakeVirtualDevice()
+        self.mapper = InputMapper(ProfileConfig(
+            button_maps={int(k): int(v) for k, v in DS4_TO_XBOX_BTN_MAP.items()},
+        ))
+
+    def _key(self, code, value):
+        self.worker._process_dpad_key(
+            code, value, self.mapper, self.vdev.write_event, self.vdev.sync,
+        )
+
+    def test_default_hat_mode_emits_diagonal_and_neutral_transitions(self):
+        self.assertEqual(self.mapper.profile.dpad_output_mode, "hat")
+        self._key(e.BTN_DPAD_UP, 1)
+        self._key(e.BTN_DPAD_LEFT, 1)
+        self.assertIn((e.EV_ABS, e.ABS_HAT0X, -1), self.vdev.events)
+        self.assertIn((e.EV_ABS, e.ABS_HAT0Y, -1), self.vdev.events)
+        self.assertFalse(any(t == e.EV_KEY and c in {
+            e.BTN_DPAD_UP, e.BTN_DPAD_LEFT,
+        } for t, c, _ in self.vdev.events))
+
+        self._key(e.BTN_DPAD_UP, 0)
+        self.assertEqual(self.vdev.events[-1], (e.EV_ABS, e.ABS_HAT0Y, 0))
+        self._key(e.BTN_DPAD_LEFT, 0)
+        self.assertEqual(self.vdev.events[-1], (e.EV_ABS, e.ABS_HAT0X, 0))
+
+    def test_multiple_directions_mapped_to_one_hat_target_hold_until_last_release(self):
+        self.mapper.profile.button_maps[e.BTN_DPAD_RIGHT] = e.BTN_DPAD_UP
+        self._key(e.BTN_DPAD_UP, 1)
+        self._key(e.BTN_DPAD_RIGHT, 1)
+        self._key(e.BTN_DPAD_UP, 0)
+        self.assertEqual(self.vdev.events[-1], (e.EV_ABS, e.ABS_HAT0Y, -1))
+        self._key(e.BTN_DPAD_RIGHT, 0)
+        self.assertEqual(self.vdev.events[-1], (e.EV_ABS, e.ABS_HAT0Y, 0))
+
+    def test_custom_non_dpad_destination_remains_a_button(self):
+        self.mapper.profile.button_maps[e.BTN_DPAD_UP] = e.BTN_A
+        self._key(e.BTN_DPAD_UP, 1)
+        self._key(e.BTN_DPAD_UP, 0)
+        self.assertEqual(self.vdev.events, [
+            (e.EV_KEY, e.BTN_A, 1), (e.EV_KEY, e.BTN_A, 0),
+        ])
+
+
+class TestEvdevFrames(unittest.TestCase):
+    def setUp(self):
+        self.worker = WorkerThread()
+        self.vdev = FakeVirtualDevice()
+        self.mapper = InputMapper(ProfileConfig(
+            dpad_output_mode="buttons",
+            button_maps={e.BTN_SOUTH: e.BTN_A},
+        ))
+
+    @staticmethod
+    def event(event_type, code, value):
+        return SimpleNamespace(type=event_type, code=code, value=value)
+
+    def _process(self, events, device):
+        self.worker._process_evdev_events(
+            events, device, self.mapper, self.vdev.write_event,
+            self.vdev.sync, [False],
+        )
+
+    def test_syncs_once_per_evdev_frame(self):
+        device = SimpleNamespace()
+        self._process([
+            self.event(e.EV_KEY, e.BTN_SOUTH, 1),
+            self.event(e.EV_SYN, e.SYN_REPORT, 0),
+            self.event(e.EV_KEY, e.BTN_SOUTH, 0),
+            self.event(e.EV_SYN, e.SYN_REPORT, 0),
+        ], device)
+        self.assertEqual(self.vdev.events, [
+            (e.EV_KEY, e.BTN_A, 1), (e.EV_KEY, e.BTN_A, 0),
+        ])
+        self.assertEqual(self.vdev.syncs, 2)
+
+    def test_syn_dropped_discards_tail_and_recovers_actual_key_state(self):
+        device = SimpleNamespace(
+            active_keys=lambda: [],
+            capabilities=lambda absinfo=False: {e.EV_KEY: [e.BTN_SOUTH]},
+        )
+        self._process([
+            self.event(e.EV_SYN, e.SYN_DROPPED, 0),
+            self.event(e.EV_KEY, e.BTN_SOUTH, 1),  # Lost frame data is ignored.
+            self.event(e.EV_SYN, e.SYN_REPORT, 0),
+        ], device)
+        self.assertEqual(self.vdev.events, [])
+        self.assertEqual(self.vdev.syncs, 0)
+        self.assertFalse(self.mapper.button_state.get(e.BTN_SOUTH, False))
+
+    def test_syn_dropped_releases_key_if_kernel_state_is_neutral(self):
+        self._process([
+            self.event(e.EV_KEY, e.BTN_SOUTH, 1),
+            self.event(e.EV_SYN, e.SYN_REPORT, 0),
+        ], SimpleNamespace())
+        device = SimpleNamespace(
+            active_keys=lambda: [],
+            capabilities=lambda absinfo=False: {e.EV_KEY: [e.BTN_SOUTH]},
+        )
+        self._process([
+            self.event(e.EV_SYN, e.SYN_DROPPED, 0),
+            self.event(e.EV_SYN, e.SYN_REPORT, 0),
+        ], device)
+        self.assertEqual(self.vdev.events, [
+            (e.EV_KEY, e.BTN_A, 1), (e.EV_KEY, e.BTN_A, 0),
+        ])
+        self.assertEqual(self.vdev.syncs, 2)
+
+    def test_failed_state_query_does_not_falsely_release_held_key(self):
+        self._process([
+            self.event(e.EV_KEY, e.BTN_SOUTH, 1),
+            self.event(e.EV_SYN, e.SYN_REPORT, 0),
+        ], SimpleNamespace())
+
+        def fail_query():
+            raise OSError("temporarily unavailable")
+
+        self._process([
+            self.event(e.EV_SYN, e.SYN_DROPPED, 0),
+            self.event(e.EV_SYN, e.SYN_REPORT, 0),
+        ], SimpleNamespace(
+            active_keys=fail_query,
+            capabilities=lambda absinfo=False: {},
+        ))
+        self.assertTrue(self.mapper.button_state[e.BTN_SOUTH])
+        self.assertEqual(self.vdev.events, [(e.EV_KEY, e.BTN_A, 1)])
 
 
 class TestWorkerHidrawReport(unittest.TestCase):
@@ -316,7 +483,7 @@ class TestDpadMacroHidraw(unittest.TestCase):
         up = make_usb_hidraw_report(dpad=0)
         self._process(up)
         self.macro_engine.execute_macro.assert_called_once()
-        self.assertNotIn(-1, self._hat_writes(e.ABS_HAT0Y))  # Up suppressed
+        self.assertNotIn((e.EV_KEY, e.BTN_DPAD_UP, 1), self.events)  # Up suppressed
 
         # Level source repeats the state: no second fire (transition dedup)
         self._process(up)
@@ -325,22 +492,12 @@ class TestDpadMacroHidraw(unittest.TestCase):
         # Release: still one fire, hat stays neutral
         self._process(make_usb_hidraw_report(dpad=8))
         self.macro_engine.execute_macro.assert_called_once()
-        self.assertNotIn(-1, self._hat_writes(e.ABS_HAT0Y))
+        self.assertNotIn((e.EV_KEY, e.BTN_DPAD_UP, 1), self.events)
 
-    def test_unbound_direction_still_writes_hat(self):
+    def test_unbound_direction_uses_default_button_mapping(self):
         self._process(make_usb_hidraw_report(dpad=2))  # Right (no macro)
         self.macro_engine.execute_macro.assert_not_called()
-        self.assertIn(1, self._hat_writes(e.ABS_HAT0X))
-
-    def test_step_neutralizes_only_bound_axis(self):
-        """Left has no macro: x passes through; Up is macro-bound: y zeroed."""
-        eff_x, eff_y = self.worker._dpad_macro_step(self.mapper, -1, -1)
-        self.assertEqual(eff_x, -1)   # left unbound
-        self.assertEqual(eff_y, 0)    # up bound -> suppressed
-        # Second identical call: dedup, no extra macro execution
-        self.macro_engine.execute_macro.assert_called_once()
-        self.worker._dpad_macro_step(self.mapper, -1, -1)
-        self.macro_engine.execute_macro.assert_called_once()
+        self.assertIn((e.EV_ABS, e.ABS_HAT0X, 1), self.events)
 
     def test_raw_event_emitted_for_macro_bound_button(self):
         """Regression: HIDRAW mode suppressed raw_event for macro-bound
@@ -364,7 +521,7 @@ class TestDpadMacroHidraw(unittest.TestCase):
         self.assertNotIn((e.EV_KEY, 0x130, 1), self.events)
 
     def test_macro_suppresses_write_but_raw_transition_flows(self):
-        """Macro-bound direction: the effective HAT write is suppressed but
+        """Macro-bound direction: the mapped key is suppressed but
         the PHYSICAL raw_event transition still reaches the GUI (editors/
         overlay), deduped against the physical tracker — holding the
         direction must not flood raw_event either."""
@@ -381,8 +538,10 @@ class TestDpadMacroHidraw(unittest.TestCase):
         self._process(make_usb_hidraw_report(dpad=2))
         self.assertIn((e.EV_ABS, e.ABS_HAT0X, 1), got)
         self.macro_engine.execute_macro.assert_called_once()
-        # ...while the effective write is suppressed (macro replaced it)
-        self.assertNotIn((e.EV_ABS, e.ABS_HAT0X, 1), self.events)
+        # ...while the mapped output is suppressed (macro replaced it)
+        self.assertNotIn((e.EV_KEY, e.BTN_DPAD_RIGHT, 1), self.events)
+        self.assertFalse(any(t == e.EV_ABS and c == e.ABS_HAT0X and v != 0
+                             for t, c, v in self.events))
 
         # HOLD the direction for many reports: no raw_event flood
         # (physical tracker dedup — raw stays 1 while held)

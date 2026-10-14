@@ -45,7 +45,7 @@ class TestAutoProfileAsync(unittest.TestCase):
         ap_mod.AUTO_PROFILE_FILE = self._old_file
         self._tmp.cleanup()
     def test_check_now_returns_immediately(self):
-        """xprop/pgrep must never run on the caller's (GUI) thread."""
+        """xprop must never run on the caller's (GUI) thread."""
         ap = AutoProfileManager()
         started = threading.Event()
         release = threading.Event()
@@ -85,11 +85,76 @@ class TestAutoProfileAsync(unittest.TestCase):
         ap.check_now()
         self.assertTrue(wait_until(lambda: applied), "profile must be applied")
         self.assertEqual(applied, ["CS2"])
+        ap.report_profile_application("CS2", True)
 
         # Same foreground again: no re-apply
         ap.check_now()
         self.assertTrue(wait_until(lambda: not ap._detect_busy))
         self.assertEqual(applied, ["CS2"])
+        ap.stop()
+
+    def test_rule_change_reapplies_same_foreground_and_failed_apply_can_retry(self):
+        ap = AutoProfileManager()
+        ap._rules = [AutoProfileRule(
+            name="r", program="steam", title="", profile="CS2", enabled=True,
+        )]
+        ap.get_foreground_info = lambda: ("steam", "Counter-Strike 2")  # type: ignore
+        applied = []
+        ap.profile_apply_requested.connect(applied.append)
+
+        ap._apply_detection(("steam", "Counter-Strike 2"))
+        self.assertEqual(applied, ["CS2"])
+        ap.report_profile_application("CS2", False)
+        ap._apply_detection(("steam", "Counter-Strike 2"))
+        self.assertEqual(applied, ["CS2", "CS2"])
+        ap.report_profile_application("CS2", True)
+
+        # Editing a rule invalidates the cached foreground decision even when
+        # the window key is unchanged, and re-evaluates through the async path.
+        ap.update_rule(0, AutoProfileRule(
+            name="r", program="steam", title="", profile="CS2-Updated", enabled=True,
+        ))
+        self.assertTrue(wait_until(lambda: "CS2-Updated" in applied))
+        ap.stop()
+
+    def test_missing_profile_is_not_announced_or_applied(self):
+        from PySide6.QtCore import QObject, Signal
+
+        class ProfileCatalog(QObject):
+            profiles_changed = Signal()
+
+            def __init__(self):
+                super().__init__()
+                self.available = []
+
+            def list_profiles(self):
+                return self.available
+
+        catalog = ProfileCatalog()
+        ap = AutoProfileManager(profile_manager=catalog)
+        ap._rules = [AutoProfileRule(
+            name="r", program="game", title="", profile="Missing", enabled=True,
+        )]
+        ap.get_foreground_info = lambda: ("game", "Game")  # type: ignore
+        applied = []
+        ap.profile_apply_requested.connect(applied.append)
+        ap._apply_detection(("game", "Game"))
+        self.assertEqual(applied, [])
+
+        catalog.available = ["Missing"]
+        catalog.profiles_changed.emit()
+        self.assertTrue(wait_until(lambda: applied == ["Missing"]))
+        ap.stop()
+
+    def test_wayland_does_not_treat_a_running_process_as_foreground(self):
+        ap = AutoProfileManager()
+        with mock.patch.dict("os.environ", {"DISPLAY": ""}):
+            self.assertIsNone(ap.get_foreground_info())
+            states = []
+            ap.detection_state_changed.connect(states.append)
+            ap._apply_detection(None)
+        self.assertEqual(len(states), 1)
+        self.assertIn("foco não confirmado", states[0])
         ap.stop()
 
     def test_skips_detection_when_nothing_to_apply(self):

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 
 from evdev import ecodes as e
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
@@ -37,6 +36,7 @@ from ..constants import (
     DS4Btn,
 )
 from ..engine.virtual_device import VirtualDeviceType
+from ..resource_paths import resource_path
 
 logger = logging.getLogger(__name__)
 
@@ -104,27 +104,41 @@ def target_name(code: int, device_type: VirtualDeviceType = VirtualDeviceType.XB
 #   kind: "round" | "pill" | "pad"
 # ---------------------------------------------------------------------------
 OVERLAY_BUTTON_DEFS: list[tuple[int, str, float, float, float, float, str]] = [
-    (DS4Btn.DPAD_UP,    "↑", 0.198, 0.278, 0.058, 0.058, "round"),
-    (DS4Btn.DPAD_DOWN,  "↓", 0.198, 0.392, 0.058, 0.058, "round"),
-    (DS4Btn.DPAD_LEFT,  "←", 0.152, 0.335, 0.058, 0.058, "round"),
-    (DS4Btn.DPAD_RIGHT, "→", 0.245, 0.335, 0.058, 0.058, "round"),
-    (DS4Btn.NORTH, "△", 0.765, 0.262, 0.062, 0.062, "round"),
-    (DS4Btn.EAST,  "○", 0.830, 0.330, 0.062, 0.062, "round"),
-    (DS4Btn.SOUTH, "✕", 0.760, 0.415, 0.062, 0.062, "round"),
-    (DS4Btn.WEST,  "□", 0.692, 0.330, 0.062, 0.062, "round"),
-    (DS4Btn.THUMBL, "L3", 0.280, 0.425, 0.130, 0.130, "round"),
-    (DS4Btn.THUMBR, "R3", 0.540, 0.425, 0.130, 0.130, "round"),
-    (DS4Btn.TOUCHPAD, "Touch", 0.348, 0.243, 0.278, 0.104, "pad"),
-    (DS4Btn.SELECT, "Share", 0.252, 0.256, 0.080, 0.042, "pill"),
-    (DS4Btn.START,  "Options", 0.638, 0.256, 0.080, 0.042, "pill"),
-    (DS4Btn.PS,     "PS", 0.443, 0.372, 0.058, 0.058, "round"),
-    (DS4Btn.TL,  "L1", 0.168, 0.182, 0.160, 0.042, "pill"),
-    (DS4Btn.TR,  "R1", 0.622, 0.182, 0.160, 0.042, "pill"),
-    (DS4Btn.TL2, "L2", 0.138, 0.150, 0.185, 0.032, "pill"),
-    (DS4Btn.TR2, "R2", 0.628, 0.150, 0.185, 0.032, "pill"),
+    (DS4Btn.DPAD_UP,    "↑", 0.172, 0.350, 0.050, 0.050, "round"),
+    (DS4Btn.DPAD_DOWN,  "↓", 0.172, 0.455, 0.050, 0.050, "round"),
+    (DS4Btn.DPAD_LEFT,  "←", 0.120, 0.407, 0.050, 0.050, "round"),
+    (DS4Btn.DPAD_RIGHT, "→", 0.220, 0.407, 0.050, 0.050, "round"),
+    (DS4Btn.NORTH, "△", 0.770, 0.337, 0.060, 0.060, "round"),
+    (DS4Btn.EAST,  "○", 0.835, 0.402, 0.060, 0.060, "round"),
+    (DS4Btn.SOUTH, "✕", 0.770, 0.462, 0.060, 0.060, "round"),
+    (DS4Btn.WEST,  "□", 0.702, 0.402, 0.060, 0.060, "round"),
+    (DS4Btn.THUMBL, "L3", 0.270, 0.480, 0.150, 0.150, "round"),
+    (DS4Btn.THUMBR, "R3", 0.580, 0.480, 0.150, 0.150, "round"),
+    (DS4Btn.TOUCHPAD, "Touch", 0.345, 0.278, 0.310, 0.176, "pad"),
+    (DS4Btn.SELECT, "Share", 0.291, 0.310, 0.030, 0.060, "pill"),
+    (DS4Btn.START,  "Options", 0.680, 0.310, 0.030, 0.060, "pill"),
+    (DS4Btn.PS,     "PS", 0.477, 0.466, 0.046, 0.040, "round"),
+    (DS4Btn.TL,  "L1", 0.155, 0.260, 0.130, 0.050, "pill"),
+    (DS4Btn.TR,  "R1", 0.715, 0.260, 0.130, 0.050, "pill"),
+    (DS4Btn.TL2, "L2", 0.155, 0.205, 0.130, 0.050, "pill"),
+    (DS4Btn.TR2, "R2", 0.715, 0.205, 0.130, 0.050, "pill"),
 ]
 
 HAT_CODES = (e.ABS_HAT0X, e.ABS_HAT0Y)
+STICK_AXIS_LAYOUT = {
+    "left": (e.ABS_X, e.ABS_Y, 0.345, 0.555),
+    "right": (e.ABS_RX, e.ABS_RY, 0.655, 0.555),
+}
+STICK_AXIS_CODES = {
+    axis_code
+    for x_code, y_code, *_center in STICK_AXIS_LAYOUT.values()
+    for axis_code in (x_code, y_code)
+}
+STICK_BUTTON_SIDES = {
+    int(DS4Btn.THUMBL): "left",
+    int(DS4Btn.THUMBR): "right",
+}
+STICK_INDICATOR_RADIUS = 0.038
 
 
 class ControllerOverlayWidget(QWidget):
@@ -148,10 +162,11 @@ class ControllerOverlayWidget(QWidget):
         self._pressed: dict[int, bool] = {}
         self._dpad_x = 0
         self._dpad_y = 0
+        self._axis_values = {code: 127.5 for code in STICK_AXIS_CODES}
 
         for candidate in (
-            Path(__file__).resolve().parents[2] / "assets" / "ds4_controller.png",
-            Path(__file__).resolve().parents[2] / "assets" / "joystick.png",
+            resource_path("assets", "ds4_controller.png"),
+            resource_path("assets", "joystick.png"),
         ):
             if candidate.exists():
                 pm = QPixmap(str(candidate))
@@ -167,10 +182,9 @@ class ControllerOverlayWidget(QWidget):
     # ------------------------------------------------------------------
     # Geometry
     # ------------------------------------------------------------------
-    # The source image has transparent margins; this view rect (image
-    # coordinates) is zoomed to fill the widget, so the controller looks
-    # bigger without moving any hotspot.
-    VIEW = QRectF(0.105, 0.145, 0.86, 0.635)
+    # Fit the whole perspective artwork, including the shoulder buttons,
+    # inside the preview instead of zooming into the transparent margins.
+    VIEW = QRectF(0.0, 0.05, 1.0, 0.90)
     MARGIN = 8
 
     def _image_rect(self) -> QRectF:
@@ -230,12 +244,29 @@ class ControllerOverlayWidget(QWidget):
         if event_type == e.EV_KEY:
             if code in self.pressed_codes():
                 self.set_button_pressed(code, value == 1)
-        elif event_type == e.EV_ABS and code in HAT_CODES:
-            if code == e.ABS_HAT0X:
-                self._dpad_x = value
-            else:
-                self._dpad_y = value
-            self._sync_dpad()
+        elif event_type == e.EV_ABS:
+            if code in HAT_CODES:
+                if code == e.ABS_HAT0X:
+                    self._dpad_x = value
+                else:
+                    self._dpad_y = value
+                self._sync_dpad()
+            elif code in STICK_AXIS_CODES:
+                self._axis_values[code] = value
+                self.update()
+
+    @staticmethod
+    def _axis_unit(value: float) -> float:
+        """Normalize DS4 evdev stick values (0..255) around neutral."""
+        return max(-1.0, min(1.0, (float(value) - 127.5) / 127.5))
+
+    def stick_marker_position(self, side: str) -> QPointF:
+        """Return the live stick marker position in widget coordinates."""
+        x_code, y_code, center_x, center_y = STICK_AXIS_LAYOUT[side]
+        x = center_x + self._axis_unit(self._axis_values[x_code]) * STICK_INDICATOR_RADIUS
+        y = center_y + self._axis_unit(self._axis_values[y_code]) * STICK_INDICATOR_RADIUS
+        img = self._image_rect()
+        return QPointF(img.x() + x * img.width(), img.y() + y * img.height())
 
     @staticmethod
     def pressed_codes() -> set:
@@ -302,10 +333,43 @@ class ControllerOverlayWidget(QWidget):
 
             font = QFont(self.font())
             font.setBold(mapped or pressed)
-            font.setPointSizeF(max(7.0, min(12.0, rect.height() * 0.42)))
+            font.setPointSizeF(max(7.0, min(12.0, rect.height() * (0.30 if code in STICK_BUTTON_SIDES else 0.42))))
             p.setFont(font)
             p.setPen(QPen(text))
-            p.drawText(rect, Qt.AlignCenter, symbol)
+            if code in STICK_BUTTON_SIDES:
+                label_rect = QRectF(rect.x(), rect.y() + rect.height() * 0.60,
+                                    rect.width(), rect.height() * 0.34)
+                p.drawText(label_rect, Qt.AlignCenter, symbol)
+            else:
+                p.drawText(rect, Qt.AlignCenter, symbol)
+
+        # The analog-button rings remain selectable; this separate dot shows
+        # the live X/Y position without covering the center of either stick.
+        for side, (_x_code, _y_code, center_x, center_y) in STICK_AXIS_LAYOUT.items():
+            img_center = QPointF(
+                img.x() + center_x * img.width(),
+                img.y() + center_y * img.height(),
+            )
+            track_radius = img.width() * STICK_INDICATOR_RADIUS
+            track = QRectF(
+                img_center.x() - track_radius,
+                img_center.y() - track_radius,
+                track_radius * 2,
+                track_radius * 2,
+            )
+            p.setBrush(Qt.NoBrush)
+            p.setPen(QPen(QColor(0, 212, 170, 115), 1.5))
+            p.drawEllipse(track)
+            marker = self.stick_marker_position(side)
+            marker_radius = max(3.0, img.width() * 0.009)
+            p.setPen(QPen(QColor("#101018"), 1.3))
+            p.setBrush(QBrush(accent))
+            p.drawEllipse(QRectF(
+                marker.x() - marker_radius,
+                marker.y() - marker_radius,
+                marker_radius * 2,
+                marker_radius * 2,
+            ))
 
         # Hover info bar (physical -> target)
         if self._hovered is not None:

@@ -6,11 +6,12 @@ import stat
 import tempfile
 from pathlib import Path
 
+from evdev import ecodes as e
 from PySide6.QtCore import QObject, Signal
 
 from ..constants import CONFIG_FILE, PROFILE_DIR
 from ..engine.input_mapper import AxisConfig, MacroAction, ProfileConfig, TriggerConfig
-from ..engine.virtual_device import VirtualDeviceType
+from ..engine.virtual_device import VirtualDevice, VirtualDeviceType
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +22,7 @@ MAX_MACRO_DELAY_S = 10.0
 MAX_POLL_RATE_MS = 1000
 MIN_POLL_RATE_MS = 1
 MAX_PROFILE_NAME_LEN = 64
+PROFILE_SCHEMA_VERSION = 1
 
 _CTRL_RE = re.compile(r"[\x00-\x1f\x7f]")
 _FORBIDDEN_CHARS = set('/\\:*?"<>|')
@@ -123,30 +125,31 @@ class ProfileManager(QObject):
             profiles.insert(0, "Default")
         return sorted(profiles, key=str.lower)
 
-    def load_profile(self, name: str) -> ProfileConfig:
+    def load_profile(self, name: str, remember: bool = True) -> ProfileConfig:
         safe = sanitize_profile_name(name)
         if safe is None:
             logger.warning("load_profile: unsafe name %r — using fallback", name)
-            return self.load_profile("Xbox 360") if name != "Xbox 360" \
+            return self.load_profile("Xbox 360", remember=remember) if name != "Xbox 360" \
                 else self._create_xbox360_profile("Xbox 360")
         path = self.get_profile_path(safe)
         if not path.exists():
             # Fallback to Xbox 360 if requested profile doesn't exist
             if safe.lower() in ("xbox 360", "default"):
                 return self._create_xbox360_profile("Xbox 360")
-            return self.load_profile("Xbox 360")
+            return self.load_profile("Xbox 360", remember=remember)
 
         try:
             with open(path) as f:
                 data = json.load(f)
             profile = self._dict_to_profile(data)
-            self._current_profile_name = safe
-            self._save_last_used()
+            if remember:
+                self._current_profile_name = safe
+                self._save_last_used()
             logger.info(f"Loaded profile: {safe}")
             return profile
         except Exception as e:
             logger.error(f"Failed to load profile {safe}: {e}")
-            return self._create_default_profile()
+            return self._create_xbox360_profile("Xbox 360")
 
     def save_profile(self, name: str, profile: ProfileConfig) -> bool:
         safe = sanitize_profile_name(name)
@@ -270,6 +273,11 @@ class ProfileManager(QObject):
 
         if not isinstance(data, dict) or data.get("_ds4linux_profile") is not True:
             logger.error("import_profile: not a ds4linux profile file (missing marker)")
+            return None
+        schema = data.get("_schema", PROFILE_SCHEMA_VERSION)
+        if (not isinstance(schema, int) or isinstance(schema, bool)
+                or schema != PROFILE_SCHEMA_VERSION):
+            logger.error("import_profile: unsupported profile schema %r", schema)
             return None
 
         # Name handling: untrusted file name is strictly sanitized; a name
@@ -399,8 +407,10 @@ class ProfileManager(QObject):
 
     def _profile_to_dict(self, profile: ProfileConfig) -> dict:
         return {
+            "schema_version": PROFILE_SCHEMA_VERSION,
             "name": profile.name,
             "device_type": profile.device_type.value,
+            "dpad_output_mode": profile.dpad_output_mode,
             "button_maps": profile.button_maps,
             "left_stick": {
                 "deadzone": profile.left_stick.deadzone,
@@ -465,8 +475,18 @@ class ProfileManager(QObject):
         """
         if not isinstance(data, dict):
             raise ValueError("profile data must be an object")
+        schema = data.get("schema_version", PROFILE_SCHEMA_VERSION)
+        if (not isinstance(schema, int) or isinstance(schema, bool)
+                or schema != PROFILE_SCHEMA_VERSION):
+            raise ValueError(f"unsupported profile schema {schema!r}")
 
-        # --- button maps: int code -> int code, sane ranges only ---
+        try:
+            device_type = VirtualDeviceType(data.get("device_type", "xbox"))
+        except (TypeError, ValueError):
+            device_type = VirtualDeviceType.XBOX
+        virtual_keys = set(VirtualDevice.supported_button_codes(device_type))
+
+        # --- physical EV_KEY -> advertised virtual EV_KEY ---
         button_maps: dict[int, int] = {}
         raw_maps = data.get("button_maps", {})
         if isinstance(raw_maps, dict):
@@ -475,7 +495,7 @@ class ProfileManager(QObject):
                     pk, pv = int(k), int(v)
                 except (TypeError, ValueError):
                     continue
-                if 0 <= pk <= 0x2FFFFFFF and 0 <= pv <= 0x2FFFFFFF:
+                if 0 <= pk <= e.KEY_MAX and pv in virtual_keys:
                     button_maps[pk] = pv
 
         ls = self._axis_config(data.get("left_stick"), AxisConfig)
@@ -483,7 +503,7 @@ class ProfileManager(QObject):
         lt = self._trigger_config(data.get("left_trigger"))
         rt = self._trigger_config(data.get("right_trigger"))
 
-        macros = self._parse_macros(data.get("macros"))
+        macros = self._parse_macros(data.get("macros"), virtual_keys)
 
         led_color = self._led_color(data.get("led_color"))
         try:
@@ -497,10 +517,9 @@ class ProfileManager(QObject):
             poll_rate_ms = 10
         poll_rate_ms = max(MIN_POLL_RATE_MS, min(MAX_POLL_RATE_MS, poll_rate_ms))
 
-        try:
-            device_type = VirtualDeviceType(data.get("device_type", "xbox"))
-        except ValueError:
-            device_type = VirtualDeviceType.XBOX
+        dpad_output_mode = data.get("dpad_output_mode", "hat")
+        if dpad_output_mode not in ("hat", "buttons"):
+            dpad_output_mode = "hat"
 
         name = data.get("name", "Default")
         if not isinstance(name, str):
@@ -509,6 +528,7 @@ class ProfileManager(QObject):
         return ProfileConfig(
             name=name,
             device_type=device_type,
+            dpad_output_mode=dpad_output_mode,
             button_maps=button_maps,
             macros=macros,
             left_stick=ls,
@@ -578,16 +598,18 @@ class ProfileManager(QObject):
             return (max(0, min(255, r)), max(0, min(255, g)), max(0, min(255, b)))
         return (0, 0, 255)
 
-    def _parse_macros(self, raw) -> dict[int, list[MacroAction]]:
+    def _parse_macros(self, raw, virtual_keys: set[int] | None = None) -> dict[int, list[MacroAction]]:
         macros: dict[int, list[MacroAction]] = {}
         if not isinstance(raw, dict):
             return macros
+        if virtual_keys is None:
+            virtual_keys = set(VirtualDevice.supported_button_codes(VirtualDeviceType.XBOX))
         for code_str, actions in raw.items():
             try:
                 ds4_code = int(code_str)
             except (TypeError, ValueError):
                 continue
-            if not (0 <= ds4_code <= 0x2FFFFFFF):
+            if not (0 <= ds4_code <= e.KEY_MAX):
                 continue
             macro_actions = []
             for a in actions if isinstance(actions, list) else []:
@@ -607,7 +629,7 @@ class ProfileManager(QObject):
                     )
                 except (TypeError, ValueError, AttributeError):
                     continue
-                if not (0 <= action.code <= 0x2FFFFFFF):
+                if action.action_type == "key" and action.code not in virtual_keys:
                     continue
                 action.value = max(0, min(1, action.value))
                 macro_actions.append(action)

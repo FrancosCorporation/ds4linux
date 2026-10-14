@@ -5,14 +5,14 @@
 set -e
 
 APP_NAME="DS4Linux"
-INSTALL_DIR="/opt/ds4linux"
-BIN_DIR="/usr/local/bin"
-DESKTOP_DIR="/usr/share/applications"
-ICON_DIR="/usr/share/icons/hicolor/256x256/apps"
-UDEV_RULES_DIR="/etc/udev/rules.d"
-SYSTEMD_DIR="/etc/systemd/system"
+INSTALL_DIR="${DS4LINUX_INSTALL_DIR:-/opt/ds4linux}"
+BIN_DIR="${DS4LINUX_BIN_DIR:-/usr/local/bin}"
+DESKTOP_DIR="${DS4LINUX_DESKTOP_DIR:-/usr/share/applications}"
+ICON_DIR="${DS4LINUX_ICON_DIR:-/usr/share/icons/hicolor/256x256/apps}"
+UDEV_RULES_DIR="${DS4LINUX_UDEV_RULES_DIR:-/etc/udev/rules.d}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+APP_VERSION="$(sed -n 's/^__version__ = "\([^"]*\)"/\1/p' "$SCRIPT_DIR/src/__init__.py")"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -32,6 +32,13 @@ check_root() {
     fi
 }
 
+require_command() {
+    if ! command -v "$1" >/dev/null 2>&1; then
+        log_error "Required command not found: $1"
+        return 1
+    fi
+}
+
 detect_distro() {
     if [[ -f /etc/os-release ]]; then
         . /etc/os-release
@@ -48,36 +55,27 @@ install_dependencies() {
     case $DISTRO in
         ubuntu|debian|linuxmint|pop|elementary|zorin)
             apt-get update
-            apt-get install -y python3 python3-pip python3-venv \
-                libevdev2 libevdev-dev \
-                libxcb-cursor0 \
-                python3-pyqt6 python3-pyqt6.qtsvg || true
+            apt-get install -y python3 python3-pip python3-venv python3-dev build-essential rsync \
+                libevdev2 libevdev-dev libxcb-cursor0 libegl1
             ;;
         arch|manjaro|endeavouros|garuda)
-            pacman -Sy --needed --noconfirm python python-pip python-virtualenv \
-                libevdev \
-                libxcb \
-                pyside6 qt6-svg || true
+            pacman -Sy --needed --noconfirm python python-pip python-virtualenv base-devel rsync \
+                libevdev libxcb
             ;;
         fedora|rhel|centos|rocky|almalinux)
-            dnf install -y python3 python3-pip python3-virtualenv \
-                libevdev libevdev-devel \
-                libxcb \
-                python3-pyside6 qt6-qtsvg || true
+            dnf install -y python3 python3-pip python3-devel gcc rsync \
+                libevdev libevdev-devel libxcb libxkbcommon-x11
             ;;
         opensuse*|suse)
-            zypper install -y python3 python3-pip python3-virtualenv \
-                libevdev2 libevdev-devel \
-                libxcb \
-                python3-pyside6 qt6-qtsvg || true
+            zypper install -y python3 python3-pip python3-devel gcc rsync \
+                libevdev2 libevdev-devel libxcb
             ;;
         *)
-            log_warning "Unknown distribution. Please install manually:"
-            log_warning "  - python3, python3-pip, python3-venv"
-            log_warning "  - libevdev, uinput"
-            log_warning "  - PySide6 (Qt6)"
+            log_error "Unsupported distribution '$DISTRO'; install prerequisites manually and extend this installer."
+            return 1
             ;;
     esac
+    require_command rsync
 }
 
 create_virtualenv() {
@@ -93,39 +91,29 @@ install_files() {
     rsync -a --exclude='.git' --exclude='__pycache__' --exclude='*.pyc' \
         --exclude='venv' --exclude='.venv' --exclude='*.egg-info' \
         "$SCRIPT_DIR/src/" "$INSTALL_DIR/src/"
-    cp "$SCRIPT_DIR/requirements.txt" "$INSTALL_DIR/"
-    cp "$SCRIPT_DIR/README.md" "$INSTALL_DIR/" 2>/dev/null || true
+    mkdir -p "$INSTALL_DIR/assets" "$INSTALL_DIR/udev"
+    rsync -a "$SCRIPT_DIR/assets/" "$INSTALL_DIR/assets/"
+    rsync -a "$SCRIPT_DIR/udev/" "$INSTALL_DIR/udev/"
+    install -m 0644 "$SCRIPT_DIR/requirements.txt" "$INSTALL_DIR/requirements.txt"
+    install -m 0644 "$SCRIPT_DIR/README.md" "$INSTALL_DIR/README.md"
 }
 
 install_udev_rules() {
     log_info "Installing udev rules..."
-    cp "$SCRIPT_DIR/udev/99-ds4linux.rules" "$UDEV_RULES_DIR/"
+    install -D -m 0644 "$INSTALL_DIR/udev/99-ds4linux.rules" \
+        "$UDEV_RULES_DIR/99-ds4linux.rules"
     udevadm control --reload-rules
     udevadm trigger --action=add
-    # Fix permissions for any DS4 controllers already connected
-    # (udevadm trigger doesn't re-apply sysfs permissions on existing devices)
-    for led_dir in /sys/class/leds/input*:[rgb]*; do
-        if [ -f "$led_dir/brightness" ]; then
-            # Check if this LED belongs to a DS4 controller
-            led_vendor=$(cat "$led_dir/../../idVendor" 2>/dev/null || echo "")
-            if [ "$led_vendor" = "054c" ] || \
-               ls -la "$led_dir" 2>/dev/null | grep -q "054c"; then
-                chown root:input "$led_dir/brightness" 2>/dev/null || true
-                chown root:input "$led_dir" 2>/dev/null || true
-                chmod 0660 "$led_dir/brightness" 2>/dev/null || true
-            fi
-        fi
-    done
     log_success "udev rules installed and triggered"
 }
 
 create_launcher() {
     log_info "Creating launcher script..."
-    cat > "$BIN_DIR/ds4linux" << 'EOF'
-#!/bin/bash
-cd /opt/ds4linux
-source venv/bin/activate
-exec python3 -m src.main "$@"
+    mkdir -p "$BIN_DIR"
+    cat > "$BIN_DIR/ds4linux" << EOF
+#!/bin/sh
+cd "$INSTALL_DIR"
+exec "$INSTALL_DIR/venv/bin/python" -m src.main "\$@"
 EOF
     chmod +x "$BIN_DIR/ds4linux"
 }
@@ -145,102 +133,14 @@ Icon=ds4linux
 Terminal=false
 Categories=Game;Settings;HardwareSettings;
 StartupNotify=true
+StartupWMClass=DS4Linux
 Keywords=controller;dualshock;playstation;xbox;emulator;
 EOF
 }
 
 create_icon() {
     log_info "Installing application icon..."
-    mkdir -p "$ICON_DIR"
-    
-    # Check if SVG icon exists and convert to PNG
-    if [ -f "$SCRIPT_DIR/src/icons/icon.svg" ]; then
-        log_info "Converting SVG icon to PNG..."
-        python3 << PYEOF
-from PySide6.QtSvg import QSvgRenderer
-from PySide6.QtGui import QPixmap, QPainter
-from PySide6.QtCore import QSize, QRect
-
-renderer = QSvgRenderer("$SCRIPT_DIR/src/icons/icon.svg")
-if renderer.isValid():
-    pixmap = QPixmap(256, 256)
-    pixmap.fill(0)  # Transparent
-    painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.Antialiasing)
-    renderer.render(painter, QRect(0, 0, 256, 256))
-    painter.end()
-    pixmap.save("/usr/share/icons/hicolor/256x256/apps/ds4linux.png")
-else:
-    print("Warning: SVG renderer failed, using fallback PNG")
-PYEOF
-    elif [ -f "$SCRIPT_DIR/src/icons/ds4linux.png" ]; then
-        # Fallback to pre-made PNG
-        cp "$SCRIPT_DIR/src/icons/ds4linux.png" "$ICON_DIR/"
-    else
-        # Generate a fallback icon
-        python3 << 'PYEOF'
-from PySide6.QtGui import QPixmap, QPainter, QColor, QBrush
-from PySide6.QtCore import Qt
-
-pixmap = QPixmap(256, 256)
-pixmap.fill(Qt.transparent)
-painter = QPainter(pixmap)
-painter.setRenderHint(QPainter.Antialiasing)
-
-# Background circle
-painter.setBrush(QBrush(QColor(30, 30, 46)))
-painter.setPen(Qt.NoPen)
-painter.drawEllipse(8, 8, 240, 240)
-
-# Main body
-painter.setBrush(QBrush(QColor(0, 212, 170)))
-painter.drawRoundedRect(40, 60, 176, 136, 30, 30)
-
-# Touchpad
-painter.setBrush(QBrush(QColor(20, 20, 35)))
-painter.drawRoundedRect(60, 75, 136, 40, 8, 8)
-
-# Sticks
-painter.setBrush(QBrush(QColor(40, 40, 55)))
-painter.drawEllipse(70, 140, 48, 48)
-painter.drawEllipse(138, 140, 48, 48)
-
-# D-pad
-painter.drawEllipse(70, 80, 24, 24)
-
-# Face buttons
-painter.setBrush(QBrush(QColor(40, 40, 55)))
-painter.drawEllipse(180, 100, 24, 24)
-painter.drawEllipse(208, 128, 24, 24)
-painter.drawEllipse(180, 156, 24, 24)
-painter.drawEllipse(152, 128, 24, 24)
-
-# Shoulder buttons
-painter.setBrush(QBrush(QColor(0, 180, 145)))
-painter.drawRoundedRect(30, 50, 80, 18, 8, 8)
-painter.drawRoundedRect(146, 50, 80, 18, 8, 8)
-
-painter.end()
-pixmap.save("/usr/share/icons/hicolor/256x256/apps/ds4linux.png")
-PYEOF
-    fi
-}
-
-setup_user_permissions() {
-    local installer_user="${SUDO_USER:-}"
-    if [[ -z "$installer_user" || "$installer_user" == "root" ]] || ! id "$installer_user" >/dev/null 2>&1; then
-        log_warning "Could not identify the desktop user. udev's uaccess ACL will grant access to the active seat."
-        return
-    fi
-    if ! getent group input >/dev/null; then
-        log_warning "The input group is unavailable. udev's uaccess ACL will grant access to the active seat."
-        return
-    fi
-    if usermod -a -G input "$installer_user"; then
-        log_success "$installer_user added to the input group (log out and back in to apply)"
-    else
-        log_warning "Could not add $installer_user to the input group; udev's uaccess ACL may still grant active-seat access."
-    fi
+    install -D -m 0644 "$SCRIPT_DIR/assets/icon.png" "$ICON_DIR/ds4linux.png"
 }
 
 load_hid_playstation_module() {
@@ -250,14 +150,16 @@ load_hid_playstation_module() {
     echo "hid-playstation" > /etc/modules-load.d/ds4linux.conf
     
     # Load it now for current session
-    modprobe hid-playstation 2>/dev/null || true
-    
-    log_success "hid-playstation module configured to load automatically"
+    if modprobe hid-playstation 2>/dev/null; then
+        log_success "hid-playstation module loaded and configured for boot"
+    else
+        log_warning "hid-playstation will be requested by the app; this kernel may not provide the module"
+    fi
 }
 
 main() {
     echo -e "${BLUE}╔═══════════════════════════════════════╗${NC}"
-    echo -e "${BLUE}║       DS4Linux Installer v1.0        ║${NC}"
+    echo -e "${BLUE}║     DS4Linux Installer v${APP_VERSION}       ║${NC}"
     echo -e "${BLUE}╚═══════════════════════════════════════╝${NC}"
     echo
 
@@ -274,7 +176,6 @@ main() {
     create_launcher
     create_desktop_entry
     create_icon
-    setup_user_permissions
 
     echo
     log_success "═══════════════════════════════════════"
@@ -282,8 +183,10 @@ main() {
     log_success "═══════════════════════════════════════"
     echo
     log_info "Run 'ds4linux' from terminal or find it in your application menu"
-    log_warning "Please log out and back in (or reboot) for udev/group changes to take effect"
+    log_warning "Reconnect the controller for udev permissions to take effect"
     echo
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

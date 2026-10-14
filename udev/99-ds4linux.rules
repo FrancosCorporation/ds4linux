@@ -1,22 +1,29 @@
 # DS4Linux udev rules
 # Allow access to DualShock 4 controllers for the input group and active seat
-# Place this file in /etc/udev/rules.d/99-ds4linux.rules
-# Then run: sudo udevadm control --reload-rules && sudo udevadm trigger
+# Distribution packages install this file in /usr/lib/udev/rules.d.
+# Manual installs may place it in /etc/udev/rules.d, then reload udev rules.
 #
 # Supports both hid-sony (older kernels) and hid-playstation (kernel 6.2+)
 
 # --- HIDRAW Access (for LED output reports) ---
 # DS4 Bluetooth (PID 09cc)
 SUBSYSTEM=="hidraw", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="09cc", GROUP="input", MODE="0660", TAG+="uaccess"
+# Bluetooth HID devices are exposed through uhid and do not have USB idVendor/idProduct attributes.
+SUBSYSTEM=="hidraw", KERNELS=="0005:054C:09CC.*", GROUP="input", MODE="0660", TAG+="uaccess"
 # DS4 Bluetooth dongle (PID 0ba0)
 SUBSYSTEM=="hidraw", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="0ba0", GROUP="input", MODE="0660", TAG+="uaccess"
-# DS4 USB / DualSense (PID 05c4)
+SUBSYSTEM=="hidraw", KERNELS=="0005:054C:0BA0.*", GROUP="input", MODE="0660", TAG+="uaccess"
+# Additional legacy Sony controller ID recognized by the application (PID 05c4)
 SUBSYSTEM=="hidraw", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="05c4", GROUP="input", MODE="0660", TAG+="uaccess"
+SUBSYSTEM=="hidraw", KERNELS=="0005:054C:05C4.*", GROUP="input", MODE="0660", TAG+="uaccess"
 
 # --- Input Devices (evdev) ---
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="09cc", GROUP="input", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", KERNELS=="0005:054C:09CC.*", GROUP="input", MODE="0660", TAG+="uaccess"
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="0ba0", GROUP="input", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", KERNELS=="0005:054C:0BA0.*", GROUP="input", MODE="0660", TAG+="uaccess"
 KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="05c4", GROUP="input", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", SUBSYSTEM=="input", KERNELS=="0005:054C:05C4.*", GROUP="input", MODE="0660", TAG+="uaccess"
 
 # --- Uinput Access (virtual device creation) ---
 KERNEL=="uinput", GROUP="input", MODE="0660", TAG+="uaccess"

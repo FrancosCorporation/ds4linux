@@ -43,11 +43,13 @@ class ControllerSlot(QObject):
         self._status = SlotStatus.DISCONNECTED
         self._device: InputDevice | None = None
         self._device_path: str | None = None
+        self._last_device_uniq: str | None = None
         self._grabbed = False
         self._profile: ProfileConfig | None = None
         self._profile_manager = profile_manager
 
         from ..config.profile_manager import ProfileManager
+
         pm = profile_manager or ProfileManager()
         default_name = pm.get_current_profile_name() or "Default"
         self._profile = pm.load_profile(default_name)
@@ -57,7 +59,7 @@ class ControllerSlot(QObject):
         self._input_mapper = InputMapper(self._profile, macro_engine=self._macro_engine)
         self._led_controller = LEDController()
         self._worker = WorkerThread()
-        self._battery_level = 100
+        self._battery_level: int | None = None
         self._motion_provider = DS4MotionProvider()
         self._motion_reader: DS4MotionReader | None = None
         self._dsu_rumble = [0, 0]  # [strong, weak] set by DSU clients
@@ -83,46 +85,54 @@ class ControllerSlot(QObject):
 
     @profile.setter
     def profile(self, value: ProfileConfig):
+        self.apply_profile(value)
+
+    def apply_profile(self, value: ProfileConfig) -> bool:
         was_running = self._worker.isRunning()
+        if not self._macro_engine.pause_and_cancel(timeout=1.0):
+            logger.warning("Slot %s: macro output did not stop; preserving current profile", self._slot_id)
+            self._macro_engine.resume()
+            return False
         if was_running:
             self._worker.stop(intentional=True)
-            if not self._worker.wait(1000):
-                # Rare: the loop is still winding down (exit took >2s).
-                # Give it a bounded extra window instead of swapping the
-                # virtual device under a live thread (its select()/writes
-                # would hit a destroyed fd).
-                if not self._worker.wait(2000):
-                    logger.warning(
-                        "Slot %s: worker did not exit before the profile "
-                        "swap — proceeding with the device swap anyway",
-                        self._slot_id,
-                    )
-            # Release keys the stopped run left pressed BEFORE set_profile
-            # resets the mapper state: the vdev survives a same-type swap
-            # and would keep them stuck until the next press+release. Only
-            # when the thread really exited AND the vdev is still alive —
-            # a winding-down thread may still write the same vdev, and a
-            # destroyed vdev has nothing stuck on it.
-            if not self._worker.isRunning() and self._virtual_device.is_active():
+            if self._worker.isRunning():
+                self._worker.wait(3000)
+            if self._worker.isRunning():
+                logger.warning("Slot %s: worker did not exit; preserving current profile", self._slot_id)
+                self._macro_engine.resume()
+                return False
+
+        applied = False
+        try:
+            if self._virtual_device.is_active():
                 self._worker.release_stuck_buttons(
                     self._input_mapper,
                     self._virtual_device.write_event,
                     self._virtual_device.sync,
                 )
 
-        self._profile = value
-        self._input_mapper.set_profile(value)
-        self._virtual_device.set_device_type(value.device_type)
+            applied = self._virtual_device.set_device_type(value.device_type)
+            if applied and self.is_connected and not self._virtual_device.is_active():
+                applied = self._virtual_device.create()
+            if not applied:
+                logger.error("Slot %s: virtual device type switch failed; keeping old profile", self._slot_id)
+                self._virtual_device.set_device_type(self._profile.device_type)
+            else:
+                self._profile = value
+                self._input_mapper.set_profile(value)
 
-        # Reconnect worker to new virtual device
-        self._worker.set_virtual_device(self._virtual_device)
+            # Reconnect worker to new virtual device only after it has exited.
+            self._worker.set_virtual_device(self._virtual_device)
 
-        if self._led_controller.is_available():
-            self._led_controller.set_color(*value.led_color)
-            self._led_controller.set_brightness(value.led_brightness)
+            if applied and self._led_controller.is_available():
+                self._led_controller.set_color(*value.led_color)
+                self._led_controller.set_brightness(value.led_brightness)
+        finally:
+            self._macro_engine.resume()
 
         if was_running and self.is_connected:
             self.start_worker()
+        return applied
 
     @property
     def device(self) -> InputDevice | None:
@@ -137,7 +147,12 @@ class ControllerSlot(QObject):
         return self._device is not None
 
     @property
-    def battery_level(self) -> int:
+    def input_grabbed(self) -> bool:
+        """Whether evdev exclusively diverts this physical device's events."""
+        return self._grabbed
+
+    @property
+    def battery_level(self) -> int | None:
         return self._battery_level
 
     @property
@@ -198,7 +213,7 @@ class ControllerSlot(QObject):
             self._motion_reader = None
 
     def set_profile(self, profile: ProfileConfig):
-        self.profile = profile
+        return self.apply_profile(profile)
 
     def attach_device(self, device_path: str) -> bool:
         if self.is_connected:
@@ -207,90 +222,136 @@ class ControllerSlot(QObject):
         self.status = SlotStatus.CONNECTING
         try:
             self._device = InputDevice(device_path)
-            print(f"[SLOT{self._slot_id}] Controle Físico Encontrado: {device_path} name={self._device.name}")
         except (OSError, PermissionError) as e:
-            logger.error(f"Cannot open {device_path}: {e}")
-            print(f"[SLOT{self._slot_id}] ERRO: Não foi possível abrir {device_path}: {e}")
+            logger.error("Slot %s: cannot open %s: %s", self._slot_id, device_path, e)
             self.status = SlotStatus.ERROR
             return False
+
+        try:
+            self._last_device_uniq = self._device.uniq or None
+        except Exception:
+            self._last_device_uniq = None
+            logger.debug("Could not read unique id from %s", device_path, exc_info=True)
+        try:
+            name = self._device.name
+        except Exception:
+            name = "unknown"
+        logger.info("Slot %s: physical controller %s (%s)", self._slot_id, name, device_path)
 
         # Attempt exclusive grab with proper error handling
         try:
             self._device.grab()
             self._grabbed = True
-            print(f"[SLOT{self._slot_id}] Grab exclusivo concedido em {device_path}")
+            logger.debug("Slot %s: exclusive grab acquired for %s", self._slot_id, device_path)
         except OSError as e:
-            print(f"[SLOT{self._slot_id}] ERRO CRÍTICO: grab() falhou — dispositivo ocupado por outro processo ({e})")
-            print(f"[SLOT{self._slot_id}]   Verifique se Steam Input, ds4drv ou outra instância do ds4linux está rodando")
-            logger.warning(f"grab() failed for {device_path}: {e} - continuing without grab")
+            message = (
+                f"Slot {self._slot_id}: exclusive evdev grab failed for {device_path}: {e}. "
+                "Disable Steam Input, ds4drv, or another controller service, then reconnect. "
+                "The app will not expose duplicate physical and virtual game input."
+            )
+            logger.warning(message)
+            self.log_message.emit(message)
             self._grabbed = False
+            self._release_physical_device()
+            self.status = SlotStatus.ERROR
+            return False
 
         if not self._virtual_device.is_active():
             if self._virtual_device.create():
-                print(f"[SLOT{self._slot_id}] Dispositivo Virtual Criado com sucesso (fd={self._virtual_device.uinput_fd})")
+                logger.info("Slot %s: virtual device is ready", self._slot_id)
             else:
-                print(f"[SLOT{self._slot_id}] ERRO: Falha ao criar Dispositivo Virtual!")
+                logger.error("Slot %s: virtual device creation failed", self._slot_id)
+                self._release_physical_device()
                 self.status = SlotStatus.ERROR
                 return False
 
         self._device_path = device_path
         self.status = SlotStatus.CONNECTED
         self._battery_level = self._read_battery()
-        print(f"[SLOT{self._slot_id}] Status: CONNECTED — worker será iniciado")
+        logger.info("Slot %s: connected; input worker will start", self._slot_id)
 
         # Discover LED path from sysfs
-        led_path = LEDController.find_ds4_led(device_path)
+        try:
+            led_path = LEDController.find_ds4_led(device_path)
+        except Exception:
+            led_path = None
+            logger.warning("Could not discover LED for %s", device_path, exc_info=True)
         if led_path:
             self._led_controller.set_led_path(led_path)
             logger.info(f"Found LED path: {led_path}")
 
         # Find specific HID device for this controller
         if self._device:
-            hid_path = DeviceManager.get_hid_device_path(self._device)
+            try:
+                hid_path = DeviceManager.get_hid_device_path(self._device)
+            except Exception:
+                hid_path = None
+                logger.warning("Could not discover HID interface for %s", device_path, exc_info=True)
             if hid_path:
                 self._led_controller.set_hid_device(hid_path)
                 logger.info(f"Found HID device: {hid_path}")
-                self._start_motion_reader(str(hid_path))
+                try:
+                    self._start_motion_reader(str(hid_path))
+                except Exception:
+                    logger.warning("Could not start motion reader for %s", hid_path, exc_info=True)
 
         # Apply LED settings from profile
-        self._led_controller.set_color(*self._profile.led_color)
-        self._led_controller.set_brightness(self._profile.led_brightness)
+        try:
+            self._led_controller.set_color(*self._profile.led_color)
+            self._led_controller.set_brightness(self._profile.led_brightness)
+        except Exception:
+            logger.warning("Could not apply initial LED settings", exc_info=True)
 
         self.device_connected.emit(self._device)
         self.log_message.emit(f"Slot {self._slot_id}: DS4 connected at {device_path}")
         return True
 
-    def detach_device(self):
+    def detach_device(self) -> bool:
         self._stop_motion_reader()
         if not self._device:
-            return
-        if self._grabbed:
-            try:
-                self._device.ungrab()
-            except OSError:
-                pass
-            self._grabbed = False
-            print(f"[SLOT{self._slot_id}] Dispositivo físico desanexado e ungrab")
-        # Close regardless of grab: when grab() failed the fd stayed open
-        # until GC (evdev __del__), leaking one descriptor per reattach.
-        try:
-            self._device.close()
-        except OSError:
-            pass
-
+            return True
+        if not self.stop_worker():
+            logger.error(
+                "Slot %s: keeping device resources open because worker is still active", self._slot_id
+            )
+            return False
         was_connected = self.is_connected
-        self._device = None
-        self._device_path = None
+        self._release_physical_device()
+        self._battery_level = None
         self.status = SlotStatus.DISCONNECTED
 
         # Destroy virtual device to release event device and close cached fds
         if self._virtual_device.is_active():
             self._virtual_device.destroy()
-            print(f"[SLOT{self._slot_id}] Dispositivo Virtual destruído")
+            logger.info("Slot %s: virtual device destroyed", self._slot_id)
 
         if was_connected:
             self.device_disconnected.emit()
             self.log_message.emit(f"Slot {self._slot_id}: DS4 disconnected")
+        return True
+
+    def _release_physical_device(self):
+        """Ungrab and close the physical fd, including failed attach paths."""
+        device = self._device
+        if device is None:
+            self._device_path = None
+            self._grabbed = False
+            return
+        if self._grabbed:
+            try:
+                device.ungrab()
+            except OSError:
+                pass
+            self._grabbed = False
+            logger.debug("Slot %s: released exclusive grab", self._slot_id)
+        # Close regardless of grab: when grab() failed the fd stayed open
+        # until GC (evdev __del__), leaking one descriptor per reattach.
+        try:
+            device.close()
+        except OSError:
+            pass
+        self._device = None
+        self._device_path = None
 
     def _setup_worker(self):
         self._worker.set_input_mapper(self._input_mapper)
@@ -299,10 +360,15 @@ class ControllerSlot(QObject):
         self._worker.device_connected.connect(self._on_worker_connected)
         self._worker.device_disconnected.connect(self._on_worker_disconnected)
         self._worker.log_message.connect(self.log_message.emit)
-        self._worker.battery_update.connect(self.battery_update.emit)
+        self._worker.battery_update.connect(self._on_worker_battery_update)
 
     def _on_worker_connected(self, device):
         pass
+
+    def _on_worker_battery_update(self, level: int):
+        if 0 <= level <= 100:
+            self._battery_level = level
+            self.battery_update.emit(level)
 
     def _on_worker_disconnected(self):
         if self.is_connected:
@@ -310,32 +376,43 @@ class ControllerSlot(QObject):
 
     def start_worker(self):
         if self.is_connected and self._input_mapper and not self._worker.isRunning():
+            self._macro_engine.resume()
             logger.info("Slot %s: starting worker loop", self._slot_id)
             if self._profile is not None:
                 self._worker.set_select_timeout(self._profile.poll_rate_ms / 1000.0)
             self._worker.set_device(self._device)
             self._worker.set_device_grabbed(self._grabbed)
             self._worker.start()
-            print(f"[SLOT{self._slot_id}] Worker started (thread={self._worker.thread()})")
+            logger.info("Slot %s: input worker started", self._slot_id)
         elif self._worker.isRunning():
-            print(f"[SLOT{self._slot_id}] Worker já está rodando, não iniciando novamente")
+            logger.debug("Slot %s: input worker is already running", self._slot_id)
 
-    def stop_worker(self):
+    def stop_worker(self) -> bool:
+        if not self._macro_engine.pause_and_cancel(timeout=1.0):
+            logger.error("Slot %s: macro output did not stop", self._slot_id)
+            return False
         if self._worker.isRunning():
-            print(f"[SLOT{self._slot_id}] Parando Worker...")
-            self._worker.stop()
-            self._worker.wait(2000)
-            print(f"[SLOT{self._slot_id}] Worker parado")
+            logger.info("Slot %s: stopping input worker", self._slot_id)
+            self._worker.stop(intentional=True)
+            if self._worker.isRunning():
+                self._worker.wait(3000)
+            if self._worker.isRunning():
+                logger.error("Slot %s: worker did not stop", self._slot_id)
+                self._macro_engine.resume()
+                return False
+            logger.info("Slot %s: input worker stopped", self._slot_id)
+        self._macro_engine.resume()
+        return True
 
-    def _read_battery(self) -> int:
-        """Battery level 0-100 from the kernel power supply, 0 = unknown.
+    def _read_battery(self) -> int | None:
+        """Battery level 0-100 from sysfs, None = unknown.
 
         The old code read ``self._device.device.read_feature_report(...)``
         which does not exist on evdev devices (AttributeError on every
         call), so the GUI battery column never updated from ``--``.
         """
         if not self._device:
-            return 0
+            return None
         try:
             hid_path = DeviceManager.get_hid_device_path(self._device)
         except Exception:
@@ -345,8 +422,7 @@ class ControllerSlot(QObject):
     def refresh_battery(self):
         if self.is_connected:
             level = self._read_battery()
-            # 0 means "unknown" — keep the last known value instead of lying.
-            if level > 0 and level != self._battery_level:
+            if level is not None and level != self._battery_level:
                 self._battery_level = level
                 self.battery_update.emit(level)
 
@@ -388,7 +464,9 @@ class ControllerSlot(QObject):
         return ok
 
     def cleanup(self):
-        self.stop_worker()
-        self.detach_device()
+        if not self.stop_worker() or not self.detach_device():
+            logger.error("Slot %s: cleanup deferred because worker is active", self._slot_id)
+            return False
         self._led_controller.close()
         self._macro_engine.shutdown()
+        return True

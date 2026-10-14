@@ -42,8 +42,14 @@ class MacroEngine:
         self._pending: list[list[MacroAction]] = []
         self._lock = threading.Lock()
         self._wake = threading.Event()
+        self._interrupt = threading.Event()
+        self._idle = threading.Event()
+        self._idle.set()
+        self._generation = 0
         self._stopped = False
+        self._paused = False
         self._worker: threading.Thread | None = None
+        self._pressed_keys: set[int] = set()
         self.dropped = 0  # macros discarded because the queue was full
 
     # ------------------------------------------------------------------
@@ -54,7 +60,7 @@ class MacroEngine:
         if not actions:
             return False
         with self._lock:
-            if self._stopped:
+            if self._stopped or self._paused:
                 return False
             if len(self._pending) >= self.MAX_PENDING:
                 self._pending.pop(0)
@@ -71,14 +77,53 @@ class MacroEngine:
             return len(self._pending)
 
     def shutdown(self, timeout: float = 1.0) -> None:
-        """Stop the worker thread (idempotent)."""
+        """Cancel active output and stop the worker thread permanently."""
         with self._lock:
             self._stopped = True
+            self._generation += 1
+            self._pending.clear()
             worker = self._worker
-            self._worker = None
+            self._interrupt.set()
         self._wake.set()
         if worker is not None and worker.is_alive():
             worker.join(timeout)
+
+    def cancel_all(self, timeout: float = 1.0) -> bool:
+        """Discard queued macros and wait until active keys have been released.
+
+        The engine remains reusable after cancellation, for example when a
+        profile is replaced while its virtual device stays alive.
+        """
+        return self._cancel_pending(timeout, pause=False)
+
+    def pause_and_cancel(self, timeout: float = 1.0) -> bool:
+        """Block new macro submissions and drain active output safely."""
+        return self._cancel_pending(timeout, pause=True)
+
+    def _cancel_pending(self, timeout: float, pause: bool) -> bool:
+        with self._lock:
+            self._generation += 1
+            self._paused = pause
+            self._pending.clear()
+            worker = self._worker
+            self._interrupt.set()
+        self._wake.set()
+        if worker is not None and worker.is_alive():
+            finished = self._idle.wait(max(0.0, timeout))
+        else:
+            finished = self._idle.is_set()
+        if finished:
+            if not pause:
+                self._interrupt.clear()
+        return finished
+
+    def resume(self) -> None:
+        with self._lock:
+            if self._stopped:
+                return
+            self._paused = False
+            self._interrupt.clear()
+        self._wake.set()
 
     # ------------------------------------------------------------------
     # Worker
@@ -99,31 +144,75 @@ class MacroEngine:
                 if self._stopped:
                     return
                 actions = self._pending.pop(0) if self._pending else None
+                if actions is not None:
+                    self._idle.clear()
             if actions is None:
                 self._wake.wait(self.IDLE_POLL_S)
                 self._wake.clear()
                 continue
-            self._run_macro(actions)
+            try:
+                with self._lock:
+                    generation = self._generation
+                self._run_macro(actions, generation)
+            finally:
+                self._idle.set()
 
-    def _run_macro(self, actions: list[MacroAction]) -> None:
+    def _run_macro(self, actions: list[MacroAction], generation: int) -> None:
         for action in actions:
+            if self._is_cancelled(generation):
+                self._release_active_keys()
+                return
             try:
                 if action.action_type == "wait":
-                    self._sleep(action.delay)
+                    if self._wait_interruptible(action.delay, generation):
+                        self._release_active_keys()
+                        return
                 elif action.action_type == "key":
                     self.vdev.write_event(EV_KEY, action.code, action.value)
                     self.vdev.sync()
+                    if action.value == 0:
+                        self._pressed_keys.discard(action.code)
+                    else:
+                        self._pressed_keys.add(action.code)
                     if action.delay > 0:
-                        self._sleep(action.delay)
+                        if self._wait_interruptible(action.delay, generation):
+                            self._release_active_keys()
+                            return
             except Exception:
                 logger.debug("Macro step failed", exc_info=True)
                 break
+        self._release_active_keys()
+
+    def _is_cancelled(self, generation: int) -> bool:
+        with self._lock:
+            return self._stopped or generation != self._generation
+
+    def _wait_interruptible(self, seconds: float, generation: int) -> bool:
+        delay = self._bounded_delay(seconds)
+        if delay <= 0:
+            return self._is_cancelled(generation)
+        return self._interrupt.wait(delay) or self._is_cancelled(generation)
+
+    def _release_active_keys(self) -> None:
+        for code in tuple(self._pressed_keys):
+            try:
+                self.vdev.write_event(EV_KEY, code, 0)
+                self.vdev.sync()
+            except Exception:
+                logger.warning("Could not release macro key %s", code, exc_info=True)
+            finally:
+                self._pressed_keys.discard(code)
 
     @classmethod
-    def _sleep(cls, seconds: float) -> None:
+    def _bounded_delay(cls, seconds: float) -> float:
         try:
             delay = float(seconds)
         except (TypeError, ValueError):
-            return
+            return 0.0
+        return min(delay, cls.MAX_DELAY_S) if delay > 0 else 0.0
+
+    @classmethod
+    def _sleep(cls, seconds: float) -> None:
+        delay = cls._bounded_delay(seconds)
         if delay > 0:
-            time.sleep(min(delay, cls.MAX_DELAY_S))
+            time.sleep(delay)

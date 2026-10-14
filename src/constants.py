@@ -1,6 +1,8 @@
 from enum import IntEnum
 from pathlib import Path
 
+from . import __version__
+
 
 class EVType(IntEnum):
     SYN = 0x00
@@ -196,7 +198,7 @@ PS4_ABS_MAP = {
 DS4_VID = 0x054C
 DS4_PID = 0x09CC
 DS4_PID_DONGLE = 0x0BA0
-DS4_PID_ALT = 0x05C4  # DualSense (PS5) and some newer DS4 variants
+DS4_PID_ALT = 0x05C4  # Legacy Sony controller ID retained for compatibility.
 
 # All PIDs we recognize as DS4/compatible
 DS4_PIDS = (DS4_PID, DS4_PID_DONGLE, DS4_PID_ALT)
@@ -213,34 +215,11 @@ MAX_TRIGGER_VALUE = 255
 PROFILE_DIR = Path.home() / ".config" / "ds4linux" / "profiles"
 CONFIG_FILE = Path.home() / ".config" / "ds4linux" / "config.json"
 
-UDEV_RULE_CONTENT = '''# DS4Linux udev rules — supports hid-sony and hid-playstation drivers
-# Install: sudo cp 99-ds4linux.rules /etc/udev/rules.d/ && sudo udevadm control --reload-rules && sudo udevadm trigger
-
-# HIDRAW (LED output reports)
-SUBSYSTEM=="hidraw", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="09cc", MODE="0666", TAG+="uaccess"
-SUBSYSTEM=="hidraw", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="0ba0", MODE="0666", TAG+="uaccess"
-SUBSYSTEM=="hidraw", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="05c4", MODE="0666", TAG+="uaccess"
-
-# Input (evdev)
-KERNEL=="event*", SUBSYSTEM=="input", ATTRS{idVendor}=="054c", MODE="0660", TAG+="uaccess"
-
-# Uinput (virtual device)
-KERNEL=="uinput", MODE="0666", TAG+="uaccess"
-
-# LED sysfs — hid-playstation (input*:rgb:*) and hid-sony (input*:red/green/blue/global)
-SUBSYSTEM=="leds", ATTRS{idVendor}=="054c", MODE="0666", TAG+="uaccess"
-SUBSYSTEM=="leds", KERNEL=="input*:red", MODE="0666", TAG+="uaccess"
-SUBSYSTEM=="leds", KERNEL=="input*:green", MODE="0666", TAG+="uaccess"
-SUBSYSTEM=="leds", KERNEL=="input*:blue", MODE="0666", TAG+="uaccess"
-SUBSYSTEM=="leds", KERNEL=="input*:global", MODE="0666", TAG+="uaccess"
-SUBSYSTEM=="leds", KERNEL=="input*:rgb:*", MODE="0666", TAG+="uaccess"
-'''
-
 VIRTUAL_DEVICE_TYPES = ("xbox", "ps4")
 
 
 APP_NAME = "DS4Linux"
-APP_VERSION = "1.4.0"
+APP_VERSION = __version__
 ORG_NAME = "DS4Linux"
 ORG_DOMAIN = "ds4linux.app"
 

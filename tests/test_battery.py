@@ -54,22 +54,24 @@ class TestSysfsSource(unittest.TestCase):
             battery_percent_from_sysfs("/dev/hidraw3"), 42
         )
 
-    def test_clamps_out_of_range(self):
+    def test_rejects_out_of_range_capacity_without_confusing_it_with_empty(self):
         self.capacity.write_text("255\n")
-        self.assertEqual(battery_percent_from_sysfs("/dev/hidraw3"), 100)
+        self.assertIsNone(battery_percent_from_sysfs("/dev/hidraw3"))
         self.capacity.write_text("-5\n")
+        self.assertIsNone(battery_percent_from_sysfs("/dev/hidraw3"))
+        self.capacity.write_text("0\n")
         self.assertEqual(battery_percent_from_sysfs("/dev/hidraw3"), 0)
 
-    def test_unknown_path_or_missing_supply_returns_zero(self):
-        self.assertEqual(battery_percent_from_sysfs(None), 0)
-        self.assertEqual(battery_percent_from_sysfs("/dev/hidraw99"), 0)
+    def test_unknown_path_or_missing_supply_returns_none(self):
+        self.assertIsNone(battery_percent_from_sysfs(None))
+        self.assertIsNone(battery_percent_from_sysfs("/dev/hidraw99"))
         self.capacity.write_text("80\n")
         self.capacity.unlink()
-        self.assertEqual(battery_percent_from_sysfs("/dev/hidraw3"), 0)
+        self.assertIsNone(battery_percent_from_sysfs("/dev/hidraw3"))
 
     def test_garbage_capacity_returns_zero(self):
         self.capacity.write_text("not-a-number\n")
-        self.assertEqual(battery_percent_from_sysfs("/dev/hidraw3"), 0)
+        self.assertIsNone(battery_percent_from_sysfs("/dev/hidraw3"))
 
 
 class TestWorkerBattery(unittest.TestCase):
@@ -78,13 +80,13 @@ class TestWorkerBattery(unittest.TestCase):
 
         self.worker = WorkerThread()
 
-    def test_read_without_device_is_zero(self):
-        self.assertEqual(self.worker._read_battery(), 0)
+    def test_read_without_device_is_unknown(self):
+        self.assertIsNone(self.worker._read_battery())
 
     def test_read_falls_back_to_last_status_byte(self):
         self.worker._last_battery_status = 11
         with mock.patch(
-            "src.engine.worker_thread.battery_percent_from_sysfs", return_value=0
+            "src.engine.worker_thread.battery_percent_from_sysfs", return_value=None
         ):
             self.assertEqual(self.worker._read_battery(), 100)
 
@@ -104,11 +106,16 @@ class TestWorkerBattery(unittest.TestCase):
             self.worker._maybe_emit_battery()
         self.assertEqual(got, [55])
 
-        # Unknown (0) reads are never emitted.
+        # Unknown reads are never emitted, but 0% is a real measurement.
+        self.worker._last_battery_poll = overdue
+        with mock.patch.object(self.worker, "_read_battery", return_value=None):
+            self.worker._maybe_emit_battery()
+        self.assertEqual(got, [55])
+
         self.worker._last_battery_poll = overdue
         with mock.patch.object(self.worker, "_read_battery", return_value=0):
             self.worker._maybe_emit_battery()
-        self.assertEqual(got, [55])
+        self.assertEqual(got, [55, 0])
 
     def test_poll_emits_again_after_interval(self):
         got: list[int] = []
@@ -151,11 +158,16 @@ class TestWorkerBattery(unittest.TestCase):
 
 
 class TestSlotBattery(unittest.TestCase):
-    def test_slot_read_without_device_is_zero(self):
+    def test_slot_read_without_device_is_unknown(self):
         from src.engine.controller_slot import ControllerSlot
 
         slot = ControllerSlot(0)
-        self.assertEqual(slot._read_battery(), 0)
+        self.assertIsNone(slot._read_battery())
+        updates = []
+        slot.battery_update.connect(updates.append)
+        slot._on_worker_battery_update(0)
+        self.assertEqual(slot.battery_level, 0)
+        self.assertEqual(updates, [0])
 
 
 if __name__ == "__main__":

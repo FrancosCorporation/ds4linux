@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Callable
 from enum import Enum
 
 from evdev import AbsInfo, UInput
@@ -11,8 +12,6 @@ from ..constants import MAX_AXIS_VALUE, MAX_TRIGGER_VALUE
 
 logger = logging.getLogger(__name__)
 
-INPUT_PROP_GAMEPAD = 0x05
-
 
 class VirtualDeviceType(Enum):
     XBOX = "xbox"
@@ -21,17 +20,47 @@ class VirtualDeviceType(Enum):
 
 class VirtualDevice:
     def __init__(self, device_type: VirtualDeviceType = VirtualDeviceType.XBOX, slot_id: int = 0):
-        print(f"[VDEV] __init__ slot={slot_id} type={device_type.value}")
-        self.device_type = device_type
         self._slot_id = slot_id
+        logger.debug("Slot %s: initializing virtual device type=%s", slot_id, device_type.value)
+        self.device_type = device_type
         self._uinput: UInput | None = None
         self._event_fd: int = -1
         self._event_fd_cached: bool = False
-        self._caps, self._name, self._vendor, self._product, self._version = \
-            self._build_capabilities()
+        self._event_observer: Callable[[int, int, int], None] | None = None
+        self._caps, self._name, self._vendor, self._product, self._version = self._build_capabilities()
+
+    @staticmethod
+    def supported_button_codes(device_type: VirtualDeviceType) -> tuple[int, ...]:
+        common = (
+            e.BTN_GAMEPAD,
+            e.BTN_TL,
+            e.BTN_TR,
+            e.BTN_TL2,
+            e.BTN_TR2,
+            e.BTN_THUMBL,
+            e.BTN_THUMBR,
+            e.BTN_START,
+            e.BTN_SELECT,
+            e.BTN_MODE,
+            e.BTN_TOUCH,
+            e.BTN_DPAD_UP,
+            e.BTN_DPAD_DOWN,
+            e.BTN_DPAD_LEFT,
+            e.BTN_DPAD_RIGHT,
+        )
+        if device_type == VirtualDeviceType.XBOX:
+            return common + (e.BTN_A, e.BTN_B, e.BTN_X, e.BTN_Y)
+        return common + (
+            e.BTN_SOUTH,
+            e.BTN_EAST,
+            e.BTN_NORTH,
+            e.BTN_WEST,
+            e.BTN_TRIGGER_HAPPY1,
+            e.BTN_TRIGGER_HAPPY2,
+        )
 
     def _build_capabilities(self) -> tuple[dict[int, list], str, int, int, int]:
-        print(f"[VDEV] _build_capabilities type={self.device_type.value}")
+        logger.debug("Slot %s: building virtual capabilities type=%s", self._slot_id, self.device_type.value)
         caps = {
             e.EV_KEY: [],
             e.EV_ABS: [],
@@ -39,17 +68,7 @@ class VirtualDevice:
         }
 
         if self.device_type == VirtualDeviceType.XBOX:
-            caps[e.EV_KEY] = [
-                e.BTN_GAMEPAD,
-                e.BTN_A, e.BTN_B, e.BTN_X, e.BTN_Y,
-                e.BTN_TL, e.BTN_TR,
-                e.BTN_THUMBL, e.BTN_THUMBR,
-                e.BTN_START, e.BTN_SELECT,
-                e.BTN_MODE,
-                e.BTN_TOUCH,
-                e.BTN_DPAD_UP, e.BTN_DPAD_DOWN,
-                e.BTN_DPAD_LEFT, e.BTN_DPAD_RIGHT,
-            ]
+            caps[e.EV_KEY] = list(self.supported_button_codes(self.device_type))
             caps[e.EV_ABS] = [
                 (e.ABS_X, AbsInfo(0, -MAX_AXIS_VALUE, MAX_AXIS_VALUE, 0, 0, 0)),
                 (e.ABS_Y, AbsInfo(0, -MAX_AXIS_VALUE, MAX_AXIS_VALUE, 0, 0, 0)),
@@ -61,21 +80,10 @@ class VirtualDevice:
                 (e.ABS_HAT0Y, AbsInfo(0, -1, 1, 0, 0, 0)),
             ]
             name = "Microsoft X-Box 360 pad"
-            vendor, product, version = 0x045e, 0x028e, 0x0114
+            vendor, product, version = 0x045E, 0x028E, 0x0114
 
         else:  # PS4 / DS4
-            caps[e.EV_KEY] = [
-                e.BTN_GAMEPAD,
-                e.BTN_SOUTH, e.BTN_EAST, e.BTN_NORTH, e.BTN_WEST,
-                e.BTN_TL, e.BTN_TR,
-                e.BTN_THUMBL, e.BTN_THUMBR,
-                e.BTN_START, e.BTN_SELECT,
-                e.BTN_MODE,
-                e.BTN_TOUCH,
-                e.BTN_DPAD_UP, e.BTN_DPAD_DOWN,
-                e.BTN_DPAD_LEFT, e.BTN_DPAD_RIGHT,
-                e.BTN_TRIGGER_HAPPY1, e.BTN_TRIGGER_HAPPY2,
-            ]
+            caps[e.EV_KEY] = list(self.supported_button_codes(self.device_type))
             caps[e.EV_ABS] = [
                 (e.ABS_X, AbsInfo(0, -MAX_AXIS_VALUE, MAX_AXIS_VALUE, 0, 0, 0)),
                 (e.ABS_Y, AbsInfo(0, -MAX_AXIS_VALUE, MAX_AXIS_VALUE, 0, 0, 0)),
@@ -87,21 +95,16 @@ class VirtualDevice:
                 (e.ABS_HAT0Y, AbsInfo(0, -1, 1, 0, 0, 0)),
             ]
             name = "Sony Interactive Entertainment Wireless Controller"
-            vendor, product, version = 0x054c, 0x09cc, 0x0100
+            vendor, product, version = 0x054C, 0x09CC, 0x0100
 
-        print(f"[VDEV] _build_capabilities done: name={name} vendor=0x{vendor:04x} product=0x{product:04x}")
+        logger.debug("Slot %s: virtual identity %s (%04x:%04x)", self._slot_id, name, vendor, product)
         return caps, name, vendor, product, version
 
     def create(self) -> bool:
-        print(f"[VDEV] create() called slot={self._slot_id} active={self.is_active()}")
         if self.is_active():
-            print(f"[VDEV] create() skipped: already active (fd={self._uinput.fd})")
+            logger.debug("Slot %s: virtual device already active", self._slot_id)
             return True
         try:
-            print("[VDEV] Calling UInput() constructor...")
-            print(f"[VDEV]   caps EV_KEY count: {len(self._caps[e.EV_KEY])}")
-            print(f"[VDEV]   caps EV_ABS count: {len(self._caps[e.EV_ABS])}")
-            print(f"[VDEV]   caps EV_FF count: {len(self._caps[e.EV_FF])}")
             self._uinput = UInput(
                 self._caps,
                 name=self._name,
@@ -110,43 +113,49 @@ class VirtualDevice:
                 version=self._version,
                 bustype=0x03,
                 phys=f"ds4linux-uinput-{self._slot_id}",
-                input_props=[INPUT_PROP_GAMEPAD],
                 max_effects=4,
             )
-            print(f"[VDEV] UInput created successfully! fd={self._uinput.fd}")
-            print(f"[VDEV]   device.path={getattr(self._uinput.device, 'path', 'N/A')}")
+            logger.info("Slot %s: created virtual %s device", self._slot_id, self.device_type.value)
             self._event_fd = -1
             self._event_fd_cached = False
             return True
         except Exception as ex:
-            print(f"[VDEV] FAILED to create UInput: {type(ex).__name__}: {ex}")
-            import traceback
-            traceback.print_exc()
+            logger.exception("Slot %s: failed to create virtual input device: %s", self._slot_id, ex)
+            self._uinput = None
             return False
 
     def destroy(self):
-        print(f"[VDEV] destroy() called active={self.is_active()}")
         if self._uinput:
             try:
-                print(f"[VDEV] Closing UInput fd={self._uinput.fd}")
                 self._uinput.close()
-                print("[VDEV] UInput closed")
+                logger.info("Slot %s: closed virtual device", self._slot_id)
             except Exception as ex:
-                print(f"[VDEV] Error closing UInput: {ex}")
+                logger.warning(
+                    "Slot %s: failed to close virtual device: %s", self._slot_id, ex, exc_info=True
+                )
             finally:
                 self._uinput = None
         if self._event_fd >= 0:
             try:
                 os.close(self._event_fd)
-                print(f"[VDEV] Closed cached event_fd={self._event_fd}")
-            except Exception:
-                pass
+            except OSError:
+                logger.debug("Slot %s: cached virtual event fd close failed", self._slot_id, exc_info=True)
             self._event_fd = -1
             self._event_fd_cached = False
 
     def write_event(self, ev_type: int, code: int, value: int):
         if self._uinput:
-            self._uinput.write(ev_type, code, value)
+            result = self._uinput.write(ev_type, code, value)
+            if self._event_observer is not None:
+                try:
+                    self._event_observer(ev_type, code, value)
+                except Exception:
+                    logger.debug("Virtual event observer failed", exc_info=True)
+            return result
+
+    def set_event_observer(self, observer: Callable[[int, int, int], None] | None) -> None:
+        """Observe successful writes from workers and asynchronous macros."""
+        self._event_observer = observer
 
     def sync(self):
         if self._uinput:
@@ -209,15 +218,20 @@ class VirtualDevice:
         try:
             event_path = self._uinput.device.path
             if not event_path:
-                print("[VDEV] event_fd: device.path is None")
+                logger.debug("Slot %s: virtual event path is not available", self._slot_id)
                 return -1
             fd = os.open(event_path, os.O_RDWR | os.O_NONBLOCK)
-            print(f"[VDEV] event_fd: opened {event_path} -> fd={fd}")
+            logger.debug("Slot %s: opened virtual event node %s", self._slot_id, event_path)
             self._event_fd = fd
             self._event_fd_cached = True
             return fd
         except Exception as ex:
-            print(f"[VDEV] event_fd: FAILED to open {event_path}: {ex}")
+            logger.warning(
+                "Slot %s: could not open virtual event node %s: %s",
+                self._slot_id,
+                locals().get("event_path"),
+                ex,
+            )
             return -1
 
     def close_event_fd(self):
@@ -225,25 +239,35 @@ class VirtualDevice:
         if self._event_fd >= 0:
             try:
                 os.close(self._event_fd)
-                print(f"[VDEV] event_fd: closed fd={self._event_fd}")
-            except Exception:
-                pass
+            except OSError:
+                logger.debug("Slot %s: cached virtual event fd close failed", self._slot_id, exc_info=True)
             self._event_fd = -1
             self._event_fd_cached = False
 
     def set_device_type(self, device_type: VirtualDeviceType):
-        """Update device type without destroying the virtual device."""
+        """Switch virtual identity transactionally, restoring the old one on failure."""
         if device_type == self.device_type:
-            return
+            return True
 
         old_type = self.device_type
-        print(f"[VDEV] set_device_type: {old_type.value} -> {device_type.value}")
+        old_config = (self._caps, self._name, self._vendor, self._product, self._version)
+        was_active = self.is_active()
+        logger.info(
+            "Slot %s: switching virtual type %s -> %s", self._slot_id, old_type.value, device_type.value
+        )
 
-        self.device_type = device_type
-        self._caps, self._name, self._vendor, self._product, self._version = \
-            self._build_capabilities()
-
-        if self.is_active():
+        if was_active:
             self.destroy()
-            self.create()
-            print(f"[VDEV] set_device_type: recreated device as {device_type.value}")
+        self.device_type = device_type
+        self._caps, self._name, self._vendor, self._product, self._version = self._build_capabilities()
+
+        if not was_active or self.create():
+            logger.info("Slot %s: virtual type is now %s", self._slot_id, device_type.value)
+            return True
+
+        logger.error("Could not create virtual device as %s; restoring %s", device_type.value, old_type.value)
+        self.device_type = old_type
+        (self._caps, self._name, self._vendor, self._product, self._version) = old_config
+        if not self.create():
+            logger.critical("Could not recreate prior virtual device type %s", old_type.value)
+        return False

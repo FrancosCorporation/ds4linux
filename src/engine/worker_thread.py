@@ -1,3 +1,4 @@
+import errno
 import logging
 import select
 import threading
@@ -7,9 +8,9 @@ from evdev import InputDevice
 from evdev import ecodes as e
 from PySide6.QtCore import QThread, Signal
 
-from ..constants import PS4_ABS_MAP, XBOX_ABS_MAP, DS4Abs
+from ..constants import DS4Abs
 from .battery import battery_percent_from_status, battery_percent_from_sysfs
-from .dpad import DOWN, LEFT, RIGHT, UP, DpadState
+from .dpad import DOWN, LEFT, RIGHT, UP, hat_from_directions
 from .ds4_hidraw import (
     DS4_REPORT_ID_BT,
     DS4_REPORT_ID_USB,
@@ -29,7 +30,7 @@ from .ff_upload import (
 from .input_mapper import InputMapper
 from .led_controller import LEDController
 from .motion_source import parse_ds4_battery
-from .virtual_device import VirtualDevice, VirtualDeviceType
+from .virtual_device import VirtualDevice
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +51,7 @@ class WorkerThread(QThread):
     # is unavailable (otherwise the hot loop churns open/exception ~100 Hz).
     RUMBLE_RETRY_S = 1.0
     # Battery polling: sysfs/status read at most this often (GUI shows the
-    # latest emitted level; 0 means "unknown" and is never emitted).
+    # latest emitted level; None means unknown while 0 is a valid reading).
     BATTERY_POLL_S = 30.0
 
     device_connected = Signal(object)
@@ -58,6 +59,7 @@ class WorkerThread(QThread):
     battery_update = Signal(int)
     log_message = Signal(str)
     raw_event = Signal(int, int, int)
+    mapped_event = Signal(int, int, int)
     fd_updated = Signal(int, int)
 
     def __init__(self, select_timeout: float | None = None):
@@ -71,9 +73,9 @@ class WorkerThread(QThread):
         self._hidraw_reader: DS4HIDRAWReader | None = None
         self._intentional_stop = False
         self._hidraw_fd: int = -1
-        # Last known battery percent (0 = unknown) + poll throttle.
-        self._last_battery_level = 0
-        self._last_battery_status = 0
+        # None means unknown; 0 is a valid empty-battery measurement.
+        self._last_battery_level: int | None = None
+        self._last_battery_status: int | None = None
         self._last_battery_poll = 0.0
         # Raw axis dedup: HIDRAW repeats the full state at ~250 Hz — the
         # Readings tab only needs physical changes (like kernel events).
@@ -122,11 +124,13 @@ class WorkerThread(QThread):
         # stop so the Timer can never kill a game's real rumble.
         self._rumble_generation = 0
         self._test_stop_timer = None
-        # D-pad macro bookkeeping (shared by evdev HAT and HIDRAW paths):
-        # previous pressed state per BTN_DPAD_* code for transition dedup,
-        # and the last HAT value actually written to the virtual device.
-        self._dpad_macro_prev: dict[int, bool] = {}
-        self._dpad_hat_written: dict[int, int] = {}
+        # Each physical driver representation is normalized into the same
+        # four logical directions before applying the profile mappings.
+        self._dpad_sources: dict[str, set[int]] = {}
+        self._dpad_effective: set[int] = set()
+        self._dpad_target_sources: dict[int, set[int]] = {}
+        self._dpad_hat_output_active = False
+        self._dpad_hat_input = {e.ABS_HAT0X: 0, e.ABS_HAT0Y: 0}
 
     # All setters below MUST be called from the GUI thread BEFORE start();
     # run() reads them on the worker thread and never mutates them.
@@ -136,7 +140,14 @@ class WorkerThread(QThread):
 
     def set_virtual_device(self, vdev: VirtualDevice):
         self._ensure_setup_phase("set_virtual_device")
+        if self._virtual_device is not None:
+            remove_observer = getattr(self._virtual_device, "set_event_observer", None)
+            if remove_observer is not None:
+                remove_observer(None)
         self._virtual_device = vdev
+        add_observer = getattr(vdev, "set_event_observer", None)
+        if add_observer is not None:
+            add_observer(self.mapped_event.emit)
 
     def set_input_mapper(self, mapper: InputMapper):
         self._ensure_setup_phase("set_input_mapper")
@@ -209,8 +220,7 @@ class WorkerThread(QThread):
                 try:
                     self._rumble_dev = InputDevice(path)
                     self._rumble_dev.set_nonblocking(True)
-                    logger.info("Worker: rumble reader on %s (fd=%s)",
-                                path, self._rumble_dev.fd)
+                    logger.info("Worker: rumble reader on %s (fd=%s)", path, self._rumble_dev.fd)
                 except Exception:
                     logger.debug("Worker: rumble reader unavailable", exc_info=True)
         if self._rumble_dev is None:
@@ -234,8 +244,8 @@ class WorkerThread(QThread):
         if not self._intentional_stop:
             self.device_disconnected.emit()
 
-    def _read_battery(self) -> int:
-        """Battery 0-100, or 0 when it cannot be read (unknown).
+    def _read_battery(self) -> int | None:
+        """Battery 0-100, or None when it cannot be read.
 
         Sources, in order: the kernel power supply next to the HID device
         (hid-sony/hid-playstation), then the last DS4 status byte seen on
@@ -243,30 +253,26 @@ class WorkerThread(QThread):
         read_feature_report`` which does not exist on evdev devices, so
         every read raised AttributeError and the signal never fired.
         """
-        hidraw_path = (
-            self._hidraw_reader.hidraw_path if self._hidraw_reader else None
-        )
+        hidraw_path = self._hidraw_reader.hidraw_path if self._hidraw_reader else None
         if hidraw_path is None and self._device is not None:
             try:
-                hidraw_path = find_ds4_hidraw(
-                    getattr(self._device, "uniq", None)
-                )
+                hidraw_path = find_ds4_hidraw(getattr(self._device, "uniq", None))
             except Exception:
                 hidraw_path = None
         level = battery_percent_from_sysfs(hidraw_path)
-        if level <= 0 and self._last_battery_status > 0:
+        if level is None and self._last_battery_status is not None:
             level = battery_percent_from_status(self._last_battery_status)
         return level
 
     def _maybe_emit_battery(self) -> None:
         """Poll battery and emit on change (throttled by TIME, not by tick).
-        Unknown reads (0) are never emitted: the GUI treats 0 as "no data"."""
+        Unknown reads (None) are not emitted; zero percent remains valid."""
         now = time.monotonic()
         if now - self._last_battery_poll < self.BATTERY_POLL_S:
             return
         self._last_battery_poll = now
         level = self._read_battery()
-        if level > 0 and level != self._last_battery_level:
+        if level is not None and level != self._last_battery_level:
             self._last_battery_level = level
             self.battery_update.emit(level)
 
@@ -274,33 +280,262 @@ class WorkerThread(QThread):
     # D-pad helpers (BTN_DPAD_* -> ABS_HAT0X/ABS_HAT0Y)
     # ------------------------------------------------------------------
     @staticmethod
-    def _write_hat(write_event, sync, abs_map, axis_state, x, y, x_code, y_code):
-        """Write both HAT axes (only changed ones) and sync once.
+    def _dpad_codes_for_hat(x: int, y: int) -> set[int]:
+        directions = set()
+        if x < 0:
+            directions.add(e.BTN_DPAD_LEFT)
+        elif x > 0:
+            directions.add(e.BTN_DPAD_RIGHT)
+        if y < 0:
+            directions.add(e.BTN_DPAD_UP)
+        elif y > 0:
+            directions.add(e.BTN_DPAD_DOWN)
+        return directions
 
-        ``x_code``/``y_code`` are raw evdev axis codes.  Convention used by
-        every caller: ``axis_state`` keys are always plain ints, while
-        ``abs_map`` is keyed by ``DS4Abs`` members (an IntEnum, so int and
-        enum hash together — the enum conversion below only makes the map
-        lookup explicit).
+    def _process_dpad_key(self, code: int, value: int, mapper, write_event, mark_sync) -> None:
+        if code not in (e.BTN_DPAD_UP, e.BTN_DPAD_DOWN, e.BTN_DPAD_LEFT, e.BTN_DPAD_RIGHT):
+            return
+        directions = set(self._dpad_sources.get("evdev-key", set()))
+        if value in (1, 2):
+            directions.add(code)
+        elif value == 0:
+            directions.discard(code)
+        else:
+            return
+        self._set_dpad_source("evdev-key", directions, mapper, write_event, mark_sync)
+
+    def _process_dpad_hat(self, code: int, value: int, mapper, write_event, mark_sync) -> None:
+        if code not in (e.ABS_HAT0X, e.ABS_HAT0Y):
+            return
+        self._dpad_hat_input[code] = -1 if value < 0 else (1 if value > 0 else 0)
+        self._set_dpad_source(
+            "evdev-hat",
+            self._dpad_codes_for_hat(
+                self._dpad_hat_input[e.ABS_HAT0X],
+                self._dpad_hat_input[e.ABS_HAT0Y],
+            ),
+            mapper,
+            write_event,
+            mark_sync,
+        )
+
+    def _set_dpad_source(self, source: str, directions: set[int], mapper, write_event, mark_sync) -> None:
+        """Apply normalized D-pad directions through the configured mapping.
+
+        Opposites cancel according to Linux HAT semantics. BTN_DPAD events,
+        evdev HAT axes, and HIDRAW reports all reach this function, so macros,
+        removed bindings, remaps, repeat handling and destination refcounts
+        behave identically for every physical driver.
         """
-        changed = False
-        vx = abs_map.get(DS4Abs(x_code))
-        vy = abs_map.get(DS4Abs(y_code))
-        if vx is not None and axis_state.get(x_code, 0) != x:
-            axis_state[x_code] = x
-            write_event(e.EV_ABS, vx, x)
-            changed = True
-        if vy is not None and axis_state.get(y_code, 0) != y:
-            axis_state[y_code] = y
-            write_event(e.EV_ABS, vy, y)
-            changed = True
-        if changed:
+        self._dpad_sources[source] = set(directions)
+        combined = set().union(*self._dpad_sources.values()) if self._dpad_sources else set()
+        x, y = hat_from_directions(
+            direction
+            for direction, active in (
+                (LEFT, e.BTN_DPAD_LEFT in combined),
+                (RIGHT, e.BTN_DPAD_RIGHT in combined),
+                (UP, e.BTN_DPAD_UP in combined),
+                (DOWN, e.BTN_DPAD_DOWN in combined),
+            )
+            if active
+        )
+        effective = self._dpad_codes_for_hat(x, y)
+        previous = self._dpad_effective
+        self._dpad_effective = effective
+        dpad_targets = {
+            e.BTN_DPAD_UP,
+            e.BTN_DPAD_DOWN,
+            e.BTN_DPAD_LEFT,
+            e.BTN_DPAD_RIGHT,
+        }
+        hat_mode = mapper.profile.dpad_output_mode == "hat"
+        for code in (e.BTN_DPAD_UP, e.BTN_DPAD_DOWN, e.BTN_DPAD_LEFT, e.BTN_DPAD_RIGHT):
+            was_pressed, pressed = code in previous, code in effective
+            if was_pressed == pressed:
+                continue
+            target_before = mapper.written_virtual.get(code)
+            result = mapper.map_button(code, int(pressed))
+            if pressed:
+                target_after = mapper.written_virtual.get(code)
+                if hat_mode and target_after in dpad_targets:
+                    self._dpad_target_sources.setdefault(target_after, set()).add(code)
+                elif result:
+                    write_event(e.EV_KEY, result[0], result[1])
+                    mark_sync()
+            elif hat_mode and target_before in dpad_targets:
+                sources = self._dpad_target_sources.get(target_before)
+                if sources is not None:
+                    sources.discard(code)
+                    if not sources:
+                        self._dpad_target_sources.pop(target_before, None)
+            elif result:
+                write_event(e.EV_KEY, result[0], result[1])
+                mark_sync()
+
+        if hat_mode:
+            target_directions = set(self._dpad_target_sources)
+            tx, ty = hat_from_directions(
+                direction
+                for direction, code in (
+                    (LEFT, e.BTN_DPAD_LEFT),
+                    (RIGHT, e.BTN_DPAD_RIGHT),
+                    (UP, e.BTN_DPAD_UP),
+                    (DOWN, e.BTN_DPAD_DOWN),
+                )
+                if code in target_directions
+            )
+            if target_directions or self._dpad_hat_output_active:
+                for ds4_axis, value in ((DS4Abs.HAT0X, tx), (DS4Abs.HAT0Y, ty)):
+                    result = mapper.map_hat(ds4_axis, value)
+                    if result:
+                        write_event(e.EV_ABS, result[0], result[1])
+                        mark_sync()
+                self._dpad_hat_output_active = bool(tx or ty)
+
+    @staticmethod
+    def _flush_pending_sync(pending_sync, sync) -> None:
+        if pending_sync[0]:
             sync()
-        return changed
+            pending_sync[0] = False
+
+    def _process_evdev_events(
+        self, events, device, mapper, write_event, sync, pending_sync, axis_infos=None
+    ) -> None:
+        """Translate one evdev read while preserving SYN frame boundaries.
+
+        After SYN_DROPPED the kernel stream is unreliable until SYN_REPORT;
+        discard that frame tail, query the device's current state, and emit
+        only the necessary transitions into the virtual controller.
+        """
+        dropped = False
+        dpad_keys = {
+            e.BTN_DPAD_UP,
+            e.BTN_DPAD_DOWN,
+            e.BTN_DPAD_LEFT,
+            e.BTN_DPAD_RIGHT,
+        }
+        for event in events:
+            if event.type == e.EV_SYN:
+                if event.code == e.SYN_DROPPED:
+                    self._flush_pending_sync(pending_sync, sync)
+                    dropped = True
+                elif event.code == e.SYN_REPORT:
+                    if dropped:
+                        self._recover_evdev_state(
+                            device,
+                            mapper,
+                            write_event,
+                            pending_sync,
+                        )
+                        dropped = False
+                    self._flush_pending_sync(pending_sync, sync)
+                continue
+            if dropped:
+                continue
+
+            if event.type in (e.EV_KEY, e.EV_ABS):
+                self.raw_event.emit(event.type, event.code, event.value)
+
+            if event.type == e.EV_KEY:
+                if event.code in dpad_keys:
+                    self._process_dpad_key(
+                        event.code,
+                        event.value,
+                        mapper,
+                        write_event,
+                        lambda: pending_sync.__setitem__(0, True),
+                    )
+                    continue
+                result = mapper.map_button(event.code, event.value)
+                if result:
+                    write_event(e.EV_KEY, result[0], result[1])
+                    pending_sync[0] = True
+            elif event.type == e.EV_ABS:
+                if event.code in (e.ABS_HAT0X, e.ABS_HAT0Y):
+                    self._process_dpad_hat(
+                        event.code,
+                        event.value,
+                        mapper,
+                        write_event,
+                        lambda: pending_sync.__setitem__(0, True),
+                    )
+                    continue
+                results = mapper.map_axes(
+                    event.code,
+                    event.value,
+                    (axis_infos or {}).get(event.code),
+                )
+                for result in results:
+                    write_event(e.EV_ABS, result[0], result[1])
+                    pending_sync[0] = True
+
+        # Some devices/drivers omit SYN_REPORT or a fake/read chunk may end
+        # mid-frame; make sure already translated state is never stranded.
+        self._flush_pending_sync(pending_sync, sync)
+
+    def _recover_evdev_state(self, device, mapper, write_event, pending_sync) -> None:
+        """Reconcile mapped keys and axes after the kernel reports data loss."""
+        try:
+            active_keys = set(device.active_keys())
+        except (AttributeError, OSError) as ex:
+            logger.warning("Worker: cannot query active keys after SYN_DROPPED: %s", ex)
+            active_keys = None
+
+        try:
+            capabilities = device.capabilities(absinfo=False)
+        except (AttributeError, OSError, TypeError) as ex:
+            logger.warning("Worker: cannot query capabilities after SYN_DROPPED: %s", ex)
+            capabilities = {}
+
+        def mark_sync():
+            pending_sync[0] = True
+
+        if active_keys is not None:
+            key_codes = set(capabilities.get(e.EV_KEY, ()))
+            key_codes.update(mapper.button_state)
+            key_codes.update(mapper.profile.button_maps)
+            key_codes.update(mapper.profile.macros)
+            key_codes.update((e.BTN_DPAD_UP, e.BTN_DPAD_DOWN, e.BTN_DPAD_LEFT, e.BTN_DPAD_RIGHT))
+
+            for code in key_codes:
+                pressed = code in active_keys
+                if mapper.button_state.get(code, False) == pressed:
+                    continue
+                self.raw_event.emit(e.EV_KEY, code, int(pressed))
+                if code in (e.BTN_DPAD_UP, e.BTN_DPAD_DOWN, e.BTN_DPAD_LEFT, e.BTN_DPAD_RIGHT):
+                    self._process_dpad_key(code, int(pressed), mapper, write_event, mark_sync)
+                else:
+                    result = mapper.map_button(code, int(pressed))
+                    if result:
+                        write_event(e.EV_KEY, result[0], result[1])
+                        mark_sync()
+
+        abs_codes = set(capabilities.get(e.EV_ABS, ()))
+        for code in sorted(abs_codes):
+            try:
+                axis_info = device.absinfo(code)
+                value = axis_info.value
+            except (AttributeError, OSError, TypeError) as ex:
+                logger.debug("Worker: cannot query ABS_%s after SYN_DROPPED: %s", code, ex)
+                continue
+            self.raw_event.emit(e.EV_ABS, code, value)
+            if code in (e.ABS_HAT0X, e.ABS_HAT0Y):
+                self._process_dpad_hat(code, value, mapper, write_event, mark_sync)
+            else:
+                results = mapper.map_axes(code, value, axis_info)
+                for result in results:
+                    write_event(e.EV_ABS, result[0], result[1])
+                    mark_sync()
 
     def run(self):
         if not self._virtual_device or not self._input_mapper:
             self._fail_startup("Worker: missing virtual_device or input_mapper — aborting")
+            return
+
+        if self._device is not None and not self._device_grabbed:
+            self._fail_startup(
+                "Worker: exclusive evdev grab is required; HIDRAW fallback would duplicate game input"
+            )
             return
 
         vdev = self._virtual_device
@@ -312,13 +547,11 @@ class WorkerThread(QThread):
         else:
             logger.debug("Worker: virtual device already active (fd=%s)", vdev.uinput_fd)
 
-        # Determine mode: prefer evdev grab, fall back to HIDRAW
+        # An exclusive evdev grab is required whenever an evdev node exists.
+        # HIDRAW is used only for explicit reader-only operation.
         use_hidraw = False
         if self._device is None:
             logger.info("Worker: no evdev device — using HIDRAW")
-            use_hidraw = True
-        elif not self._device_grabbed:
-            logger.info("Worker: evdev not grabbed — using HIDRAW")
             use_hidraw = True
         else:
             logger.info("Worker: evdev mode on %s (grabbed)", self._device.path)
@@ -328,7 +561,8 @@ class WorkerThread(QThread):
         # ------------------------------------------------------------------
         if use_hidraw:
             uniq = getattr(self._device, "uniq", None) if self._device else None
-            hidraw_path = find_ds4_hidraw(uniq)
+            input_path = getattr(self._device, "path", None) if self._device else None
+            hidraw_path = find_ds4_hidraw(uniq, input_device_path=input_path)
             if not hidraw_path:
                 self._fail_startup("Worker: no DS4 HIDRAW device found — aborting")
                 return
@@ -349,21 +583,27 @@ class WorkerThread(QThread):
         self._phys_effect = None
         self._phys_effect_id = None
         self._rumble_active = False
-        self._dpad_macro_prev = {}
-        self._dpad_hat_written = {}
+        self._dpad_sources = {}
+        self._dpad_effective = set()
+        self._dpad_target_sources = {}
+        self._dpad_hat_output_active = False
+        self._dpad_hat_input = {e.ABS_HAT0X: 0, e.ABS_HAT0Y: 0}
         self._raw_axis_prev = {}
         self._raw_btn_prev = {}
         self._raw_hat_prev = {}
-        self._last_battery_level = 0
-        self._last_battery_status = 0
+        self._last_battery_level = None
+        self._last_battery_status = None
         # 'overdue', not 0.0: on a fresh boot (monotonic() < BATTERY_POLL_S)
         # a 0.0 reset would delay the first battery poll by up to 30 s.
         self._last_battery_poll = time.monotonic() - self.BATTERY_POLL_S - 1
         self.device_connected.emit(self._device)
 
         mapper = self._input_mapper
-        write_event = vdev.write_event
         sync = vdev.sync
+
+        def write_event(event_type: int, code: int, value: int):
+            return vdev.write_event(event_type, code, value)
+
         # Batched sync: writes are queued through the deferred marker and the
         # real syn() happens once per input batch, not per event.
         pending_sync = [False]
@@ -374,9 +614,6 @@ class WorkerThread(QThread):
         EV_KEY = e.EV_KEY
         EV_ABS = e.EV_ABS
         EV_FF = e.EV_FF
-        ABS_HAT0X = e.ABS_HAT0X
-        ABS_HAT0Y = e.ABS_HAT0Y
-
         # Release sweep: the mapper's pressed-state cache survives worker
         # restarts, but the virtual device may have been recreated (slot
         # reconnect) or left with a pressed key (worker died mid-press,
@@ -386,25 +623,19 @@ class WorkerThread(QThread):
         # state and the virtual button sticks until the next full pair.
         self.release_stuck_buttons(mapper, write_event, sync)
 
-        dpad_buttons = {
-            e.BTN_DPAD_UP: UP,
-            e.BTN_DPAD_DOWN: DOWN,
-            e.BTN_DPAD_LEFT: LEFT,
-            e.BTN_DPAD_RIGHT: RIGHT,
-        }
-
-        dpad_state = DpadState()
-
-        # Public, shared state cache (see InputMapper docs): the worker is the
-        # only writer while running, the GUI only reads indirectly via signals.
-        axis_state = mapper.axis_state
+        axis_infos = {}
+        if self._device is not None and not use_hidraw:
+            for code in (e.ABS_X, e.ABS_Y, e.ABS_RX, e.ABS_RY, e.ABS_Z, e.ABS_RZ):
+                try:
+                    axis_infos[code] = self._device.absinfo(code)
+                except (AttributeError, OSError):
+                    logger.debug("No AbsInfo for physical axis %s", code)
 
         phys_fd = self._device.fd if (self._device and not use_hidraw) else -1
         virt_fd = vdev.uinput_fd
         hidraw_fd = self._hidraw_fd
 
-        logger.debug("Worker: loop fds phys=%s virt=%s hidraw=%s",
-                     phys_fd, virt_fd, hidraw_fd)
+        logger.debug("Worker: loop fds phys=%s virt=%s hidraw=%s", phys_fd, virt_fd, hidraw_fd)
 
         consecutive_errors = 0
         try:
@@ -444,85 +675,35 @@ class WorkerThread(QThread):
                 # ------------------------------------------------------------------
                 if phys_fd in readable and self._device and not use_hidraw:
                     try:
-                        for event in self._device.read():
-                            if not self._running:
-                                break
-
-                            if event.type in (EV_KEY, EV_ABS):
-                                self.raw_event.emit(event.type, event.code, event.value)
-
-                            profile = mapper.profile
-                            abs_map = (XBOX_ABS_MAP if profile.device_type == VirtualDeviceType.XBOX
-                                       else PS4_ABS_MAP)
-
-                            if event.type == EV_KEY:
-                                code = event.code
-                                pressed = event.value == 1
-
-                                # ---- D-pad (hid-sony reports BTN_DPAD_*) ----
-                                direction = dpad_buttons.get(code)
-                                if direction is not None:
-                                    # A macro bound to a D-pad button wins
-                                    # over the hat translation.
-                                    if mapper.maybe_execute_macro(code, event.value):
-                                        continue
-                                    if dpad_state.update(direction, pressed):
-                                        self._write_hat(
-                                            write_event, mark_sync, abs_map, axis_state,
-                                            dpad_state.x, dpad_state.y,
-                                            ABS_HAT0X, ABS_HAT0Y,
-                                        )
-                                    continue
-
-                                # General mapping + macro trigger via profile
-                                result = mapper.map_button(code, event.value)
-                                if result:
-                                    write_event(EV_KEY, result[0], result[1])
-                                    mark_sync()
-
-                            elif event.type == EV_ABS:
-                                code = event.code
-                                # ---- D-pad (hid-playstation reports HAT axes) ----
-                                if code in (ABS_HAT0X, ABS_HAT0Y):
-                                    # axis_state keys are plain int evdev codes
-                                    norm = -1 if event.value < 0 else (1 if event.value > 0 else 0)
-                                    if axis_state.get(code, 0) != norm:
-                                        axis_state[code] = norm
-                                        # D-pad macros fire on hat changes too
-                                        # (mirrors the BTN_DPAD branch above).
-                                        eff_x, eff_y = self._dpad_macro_step(
-                                            mapper,
-                                            axis_state.get(ABS_HAT0X, 0),
-                                            axis_state.get(ABS_HAT0Y, 0),
-                                        )
-                                        target = eff_x if code == ABS_HAT0X else eff_y
-                                        if self._dpad_hat_written.get(code, 0) != target:
-                                            self._dpad_hat_written[code] = target
-                                            vcode = abs_map.get(DS4Abs(code))
-                                            if vcode is not None:
-                                                write_event(EV_ABS, vcode, target)
-                                                mark_sync()
-                                    continue
-
-                                result = mapper.map_axis(code, event.value)
-                                if result:
-                                    write_event(EV_ABS, result[0], result[1])
-                                    mark_sync()
-                                else:
-                                    logger.debug("Unmapped axis event: code=%s value=%s",
-                                                 code, event.value)
-                        if pending_sync[0]:
-                            sync()
-                            pending_sync[0] = False
+                        events = (event for event in self._device.read() if self._running)
+                        self._process_evdev_events(
+                            events,
+                            self._device,
+                            mapper,
+                            write_event,
+                            sync,
+                            pending_sync,
+                            axis_infos,
+                        )
                         consecutive_errors = 0
+                    except (BlockingIOError, InterruptedError):
+                        # Nonblocking evdev reads can race select(), and a
+                        # signal may interrupt a read; neither means unplug.
+                        continue
                     except OSError as ex:
+                        if ex.errno in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EINTR):
+                            continue
                         logger.error("Worker: evdev read OSError: %s", ex)
                         break
                     except Exception as ex:
                         consecutive_errors += 1
-                        logger.error("Worker: evdev unexpected error (%s/%s): %s: %s",
-                                     consecutive_errors, self.MAX_CONSECUTIVE_ERRORS,
-                                     type(ex).__name__, ex)
+                        logger.error(
+                            "Worker: evdev unexpected error (%s/%s): %s: %s",
+                            consecutive_errors,
+                            self.MAX_CONSECUTIVE_ERRORS,
+                            type(ex).__name__,
+                            ex,
+                        )
                         if consecutive_errors > self.MAX_CONSECUTIVE_ERRORS:
                             logger.error("Worker: too many consecutive errors — stopping")
                             break
@@ -536,9 +717,14 @@ class WorkerThread(QThread):
                         report = self._hidraw_reader.read_report()
                         if report and len(report) >= self.MIN_HIDRAW_REPORT_BYTES:
                             self._process_hidraw_report(
-                                report, write_event, mark_sync,
-                                mapper.button_state, mapper.axis_state,
-                                mapper, EV_KEY, EV_ABS,
+                                report,
+                                write_event,
+                                mark_sync,
+                                mapper.button_state,
+                                mapper.axis_state,
+                                mapper,
+                                EV_KEY,
+                                EV_ABS,
                             )
                             if pending_sync[0]:
                                 sync()
@@ -551,9 +737,13 @@ class WorkerThread(QThread):
                         break
                     except Exception as ex:
                         consecutive_errors += 1
-                        logger.error("Worker: hidraw error (%s/%s): %s: %s",
-                                     consecutive_errors, self.MAX_CONSECUTIVE_ERRORS,
-                                     type(ex).__name__, ex)
+                        logger.error(
+                            "Worker: hidraw error (%s/%s): %s: %s",
+                            consecutive_errors,
+                            self.MAX_CONSECUTIVE_ERRORS,
+                            type(ex).__name__,
+                            ex,
+                        )
                         if consecutive_errors > self.MAX_CONSECUTIVE_ERRORS:
                             logger.error("Worker: too many consecutive errors — stopping")
                             break
@@ -599,6 +789,10 @@ class WorkerThread(QThread):
         finally:
             logger.info("Worker: event loop finished — cleaning up")
             self._running = False
+            try:
+                self.release_stuck_buttons(mapper, write_event, sync)
+            except Exception:
+                logger.exception("Worker: failed to neutralize virtual output during shutdown")
             self._stop_rumble()
             if self._hidraw_reader:
                 self._hidraw_reader.close()
@@ -624,14 +818,22 @@ class WorkerThread(QThread):
         stale dedup data.
         """
         wrote = False
+        for virtual_code in set(mapper.written_axes.values()):
+            write_event(e.EV_ABS, virtual_code, 0)
+            wrote = True
+        self._dpad_sources.clear()
+        self._dpad_effective.clear()
+        self._dpad_target_sources.clear()
+        self._dpad_hat_output_active = False
+        self._dpad_hat_input = {e.ABS_HAT0X: 0, e.ABS_HAT0Y: 0}
         for ds4_code, was_pressed in list(mapper.button_state.items()):
-            # The code ACTUALLY written last run — the current button_maps
-            # may have changed (profile swap) and would release the wrong
-            # code, leaving the old one stuck on the surviving vdev.
-            virtual_code = mapper.written_virtual.get(ds4_code)
-            if was_pressed and virtual_code is not None:
-                write_event(e.EV_KEY, virtual_code, 0)
-                wrote = True
+            if was_pressed:
+                # InputMapper retains the actual destination and reference
+                # counts, so duplicate mappings produce only the final up.
+                result = mapper.map_button(ds4_code, 0)
+                if result:
+                    write_event(e.EV_KEY, result[0], result[1])
+                    wrote = True
         mapper.reset_state()
         if wrote:
             sync()
@@ -665,45 +867,6 @@ class WorkerThread(QThread):
             pass  # no pending events
         except OSError as ex:
             logger.debug("Worker: FF handshake read error: %s", ex)
-
-    def _dpad_macro_step(self, mapper, dpad_x: int, dpad_y: int) -> tuple[int, int]:
-        """Fire macros bound to D-pad directions and neutralize them.
-
-        Shared by the evdev HAT-axes branch and the HIDRAW path (which
-        only expose the hat, unlike hid-sony's BTN_DPAD_* events — without
-        this, D-pad macros would never fire in those modes). Returns the
-        effective (x, y) with macro-bound directions zeroed so the macro
-        *replaces* the button, matching the evdev BTN_DPAD behaviour.
-        """
-        directions = (
-            (e.BTN_DPAD_LEFT, dpad_x < 0),
-            (e.BTN_DPAD_RIGHT, dpad_x > 0),
-            (e.BTN_DPAD_UP, dpad_y < 0),
-            (e.BTN_DPAD_DOWN, dpad_y > 0),
-        )
-        bound: dict[int, bool] = {}
-        for code, active in directions:
-            if not mapper.is_macro_button(code):
-                continue
-            bound[code] = True
-            prev = self._dpad_macro_prev.get(code, False)
-            if prev != active:
-                self._dpad_macro_prev[code] = active
-                if active and mapper.macro_engine is not None:
-                    # .get() instead of direct indexing: the profile can be
-                    # swapped from the GUI between is_macro_button and here.
-                    macro = (
-                        mapper.profile.macros.get(code) if mapper.profile else None
-                    )
-                    if macro:
-                        mapper.macro_engine.execute_macro(macro)
-        eff_x = 0 if (dpad_x < 0 and bound.get(e.BTN_DPAD_LEFT)) or (
-            dpad_x > 0 and bound.get(e.BTN_DPAD_RIGHT)
-        ) else dpad_x
-        eff_y = 0 if (dpad_y < 0 and bound.get(e.BTN_DPAD_UP)) or (
-            dpad_y > 0 and bound.get(e.BTN_DPAD_DOWN)
-        ) else dpad_y
-        return eff_x, eff_y
 
     # ------------------------------------------------------------------
     # Rumble: game (virtual) -> physical
@@ -765,11 +928,7 @@ class WorkerThread(QThread):
             # rest of the session (_phys_ff_ok = False forever) — a
             # transient error (EAGAIN, busy node) would permanently degrade
             # rumble to the HID fallback. Re-probe periodically instead.
-            if (
-                self._phys_ff_ok is False
-                and self._device is not None
-                and now >= self._phys_ff_retry_at
-            ):
+            if self._phys_ff_ok is False and self._device is not None and now >= self._phys_ff_retry_at:
                 self._phys_ff_ok = None
                 self._phys_ff_retry_at = now + self.PHYS_FF_RETRY_S
 
@@ -792,9 +951,7 @@ class WorkerThread(QThread):
     def _upload_and_play(self, strong: int, weak: int, length_ms: int, count: int) -> bool:
         try:
             if self._phys_effect is None:
-                self._phys_effect = build_rumble_effect(
-                    strong, weak, replay_length=length_ms, effect_id=-1
-                )
+                self._phys_effect = build_rumble_effect(strong, weak, replay_length=length_ms, effect_id=-1)
             else:
                 # Re-upload of the cached effect: evdev wrote the allocated
                 # id back into the struct on the first EVIOCSFF
@@ -866,8 +1023,9 @@ class WorkerThread(QThread):
         self._test_stop_timer = timer
         return True
 
-    def _process_hidraw_report(self, report, write_event, sync, btn_state, axis_state,
-                               mapper, EV_KEY, EV_ABS):
+    def _process_hidraw_report(
+        self, report, write_event, sync, btn_state, axis_state, mapper, EV_KEY, EV_ABS
+    ):
         """Apply one parsed HIDRAW report to the virtual device.
 
         Pure translation step between ``parse_ds4_report`` state and the
@@ -884,7 +1042,6 @@ class WorkerThread(QThread):
         """
         profile = mapper.profile
         btn_map = profile.button_maps
-        abs_map = XBOX_ABS_MAP if profile.device_type == VirtualDeviceType.XBOX else PS4_ABS_MAP
 
         # Only real DS4 input reports: anything else (unknown report id,
         # truncated BT packet) is skipped entirely — a neutral-state burst
@@ -897,7 +1054,7 @@ class WorkerThread(QThread):
             return 0, 0
 
         state = parse_ds4_report(report)
-        dpad_x, dpad_y = state['dpad_x'], state['dpad_y']
+        dpad_x, dpad_y = state["dpad_x"], state["dpad_y"]
 
         # Remember the DS4 status byte (battery capacity 0..11) so the
         # throttled poll has a fallback when sysfs has no power supply.
@@ -912,12 +1069,7 @@ class WorkerThread(QThread):
         def mark_sync():
             wrote[0] = True
 
-        prev_x = axis_state.get(e.ABS_HAT0X, 0)
-        prev_y = axis_state.get(e.ABS_HAT0Y, 0)
         raw_x, raw_y = dpad_x, dpad_y
-        # D-pad macros (hid-sony path fires BTN_DPAD_* macros; mirror here
-        # so macro-bound directions work in HIDRAW mode too).
-        dpad_x, dpad_y = self._dpad_macro_step(mapper, dpad_x, dpad_y)
         # raw_event carries the *physical* HAT, deduped against a PHYSICAL
         # tracker — axis_state stores the effective value, so a macro-bound
         # direction held down would differ from the raw value on every
@@ -930,15 +1082,24 @@ class WorkerThread(QThread):
         if raw_y != prev_raw_y:
             self._raw_hat_prev[e.ABS_HAT0Y] = raw_y
             self.raw_event.emit(EV_ABS, e.ABS_HAT0Y, raw_y)
-        if (dpad_x, dpad_y) != (prev_x, prev_y):
-            self._write_hat(write_event, mark_sync, abs_map, axis_state,
-                            dpad_x, dpad_y, e.ABS_HAT0X, e.ABS_HAT0Y)
+        self._set_dpad_source(
+            "hidraw",
+            self._dpad_codes_for_hat(raw_x, raw_y),
+            mapper,
+            write_event,
+            mark_sync,
+        )
 
-        for ds4_code, val in ((DS4Abs.X, state['lx']), (DS4Abs.Y, state['ly']),
-                              (DS4Abs.RX, state['rx']), (DS4Abs.RY, state['ry']),
-                              (DS4Abs.Z, state['l2']), (DS4Abs.RZ, state['r2'])):
-            result = mapper.map_axis(ds4_code.value, val)
-            if result:
+        for ds4_code, val in (
+            (DS4Abs.X, state["lx"]),
+            (DS4Abs.Y, state["ly"]),
+            (DS4Abs.RX, state["rx"]),
+            (DS4Abs.RY, state["ry"]),
+            (DS4Abs.Z, state["l2"]),
+            (DS4Abs.RZ, state["r2"]),
+        ):
+            results = mapper.map_axes(ds4_code.value, val)
+            for result in results:
                 write_event(EV_ABS, result[0], result[1])
                 mark_sync()
             # NOTE: raw_event always carries *physical* DS4 codes in both
@@ -950,7 +1111,7 @@ class WorkerThread(QThread):
                 self._raw_axis_prev[ds4_code.value] = val
                 self.raw_event.emit(EV_ABS, ds4_code.value, val)
 
-        for ds4_code, pressed in state['buttons'].items():
+        for ds4_code, pressed in state["buttons"].items():
             # Physical press/release FIRST, for EVERY button (mapped or
             # not): the Readings tab tracks all of them and the evdev path
             # emits unconditionally at the top of the loop. The raw
@@ -980,6 +1141,7 @@ class WorkerThread(QThread):
         if wrote[0]:
             sync()
         return dpad_x, dpad_y
+
     def stop(self, intentional=False):
         logger.debug("Worker: stop(intentional=%s)", intentional)
         if self._test_stop_timer is not None:
